@@ -1,14 +1,29 @@
 //@version=5
-indicator("Aurum Edge — MGC/MES Sniper", overlay=true, max_labels_count=50, max_lines_count=50)
+indicator("Aurum Edge — MGC/MES/MNQ Sniper", overlay=true, max_labels_count=50, max_lines_count=50)
 
 // ── Config ──────────────────────────────────────
-slMult = 1.0  // Stop loss multiplier (was 0.5)
+slMult = 1.0          // Stop loss multiplier
+mgcMinStopTicks = 20  // MGC minimum stop in ticks
+mgcMaxStopTicks = 40  // MGC maximum stop in ticks
 
 // ── Silver Bullet Window (9:50-10:10 AM ET) ─────
 silverBulletStart = timestamp(year, month, dayofmonth, 13, 50, 0)  // 13:50 UTC
 silverBulletEnd   = timestamp(year, month, dayofmonth, 14, 10, 0)  // 14:10 UTC
 inSilverBullet = time >= silverBulletStart and time < silverBulletEnd
 bgcolor(inSilverBullet ? color.new(color.yellow, 85) : na, title="Silver Bullet Window")
+
+// ── Friday Warning ──────────────────────────────
+isFriday = dayofweek == dayofweek.friday
+fridayEarlyStop = timestamp(year, month, dayofmonth, 17, 0, 0)  // 1:00 PM ET = 17:00 UTC
+afterFridayStop = time >= fridayEarlyStop
+fridayWarning = isFriday and afterFridayStop
+bgcolor(fridayWarning ? color.new(color.red, 70) : na, title="Friday Warning")
+
+// ── Sunday Entry Block ──────────────────────────
+isSunday = dayofweek == dayofweek.sunday
+sundayBlockStart = timestamp(year, month, dayofmonth, 0, 0, 0)
+sundayBlockEnd   = timestamp(year, month, dayofmonth, 21, 0, 0)  // 5:00 PM ET = 21:00 UTC
+sundayBlocked = isSunday and time >= sundayBlockStart and time < sundayBlockEnd
 
 // ── Asia Wed-Fri Gate ───────────────────────────
 asiaStart = timestamp(year, month, dayofmonth, 5, 30, 0)   // 1:30 AM ET = 5:30 UTC
@@ -17,16 +32,35 @@ inAsiaWindow = time >= asiaStart and time < asiaEnd
 isAsiaAllowedDay = dayofweek == dayofweek.monday or dayofweek == dayofweek.tuesday
 asiaBlocked = inAsiaWindow and not isAsiaAllowedDay
 
+// ── Daily Bias ──────────────────────────────────
+ema9   = ta.ema(close, 9)
+ema20  = ta.ema(close, 20)
+dailyBias = ema9 > ema20 ? "long" : "short"
+
+// ── Scenario Detection ──────────────────────────
+atr14  = ta.atr(14)
+atrPct = atr14 / close * 100
+dailyRange = high - low
+dailyRangePct = dailyRange / close * 100
+// Detect scenario
+scenario = "neutral"
+if atrPct >= 1.2 or dailyRangePct >= 1.5
+    scenario := "volatile"
+else if atrPct >= 0.8 and dailyRangePct >= 1.0
+    scenario := "trending"
+else if atrPct <= 0.3 and dailyRangePct <= 0.6
+    scenario := "quiet"
+else if atrPct <= 0.5
+    scenario := "ranging"
+
 // ───────────────────────────────────────────────
 // Step A: Key Levels (Asia H/L, PDH, PDL)
 // ───────────────────────────────────────────────
-// Asia Session (UTC 00:00–04:00) = Previous bar if in that window
 asiaHigh = request.security(syminfo.tickerid, "D", high[1])
 asiaLow  = request.security(syminfo.tickerid, "D", low[1])
 pdHigh   = request.security(syminfo.tickerid, "D", high[1])
 pdLow    = request.security(syminfo.tickerid, "D", low[1])
 
-// These are simplified — on TV we use daily pivots as proxies
 plot(asiaHigh, "Asia High", color.new(color.blue, 40), 1, plot.style_circles)
 plot(asiaLow,  "Asia Low",  color.new(color.blue, 40), 1, plot.style_circles)
 plot(pdHigh,   "PD High",   color.new(color.gray, 30), 1, plot.style_line)
@@ -52,7 +86,6 @@ displacementShort = close < open and bodySize > 1.5 * avgBody
 // ───────────────────────────────────────────────
 // Step D: Market Structure Shift (1M/5M MSS)
 // ───────────────────────────────────────────────
-// Use 5-period lookback for recent swing
 swingHigh = ta.highest(high, 5)[1]
 swingLow  = ta.lowest(low, 5)[1]
 mssLong  = close > swingHigh
@@ -61,15 +94,13 @@ mssShort = close < swingLow
 // ───────────────────────────────────────────────
 // Step E: Entry Zone (FVG / Order Block at 50%)
 // ───────────────────────────────────────────────
-// Fair Value Gap detection (3-candle pattern)
-fvgBull = low[2] > high[0]   // Candle 3 low > Candle 1 high
-fvgBear = high[2] < low[0]   // Candle 3 high < Candle 1 low
+fvgBull = low[2] > high[0]
+fvgBear = high[2] < low[0]
 
 fvgTop    = fvgBull ? low[2] : fvgBear ? high[2] : na
 fvgBottom = fvgBull ? high[0] : fvgBear ? low[0] : na
 fvgMean   = fvgTop + (fvgBottom - fvgTop) / 2
 
-// Order Block: last opposing candle before displacement
 var float obHigh = na
 var float obLow  = na
 var float obMean = na
@@ -90,7 +121,6 @@ if displacementShort
             obMean := (high[i] + low[i]) / 2
             break
 
-// Box visualization for FVG
 bgcolor(fvgBull ? color.new(color.green, 85) : na, title="Bullish FVG")
 bgcolor(fvgBear ? color.new(color.red, 85) : na, title="Bearish FVG")
 
@@ -99,20 +129,23 @@ bgcolor(fvgBear ? color.new(color.red, 85) : na, title="Bearish FVG")
 // ───────────────────────────────────────────────
 entryZoneMean = na(fvgMean) ? obMean : fvgMean
 
-// LONG setup: sweep + displacement + MSS + price at 50% zone
 longSignal = sweepLong and displacementLong and mssLong and (low <= entryZoneMean or (fvgBull and close >= fvgBottom and close <= fvgTop))
-
-// SHORT setup
 shortSignal = sweepShort and displacementShort and mssShort and (high >= entryZoneMean or (fvgBear and close >= fvgBottom and close <= fvgTop))
+
+// Gating: Asia restriction + Friday stop + Sunday block
+notBlockedByGates = not asiaBlocked and not fridayWarning and not sundayBlocked
+
+// Direction check against daily bias
+biasAligned = (dailyBias == "long" and longSignal) or (dailyBias == "short" and shortSignal)
 
 // Confluence Score (0-10)
 confluenceScore = 0
-longFinal = longSignal and not asiaBlocked
-shortFinal = shortSignal and not asiaBlocked
+longFinal = longSignal and notBlockedByGates
+shortFinal = shortSignal and notBlockedByGates
 if longFinal or shortFinal
     confluenceScore := 4  // Base: all 5 steps met
     confluenceScore := bodySize > 2 * avgBody ? confluenceScore + 2 : confluenceScore + 1  // Strong displacement
-    confluenceScore := ta.ema(close, 20) > ta.ema(close, 50) ? confluenceScore + 2 : confluenceScore + 0  // Trend alignment
+    confluenceScore := biasAligned ? confluenceScore + 2 : confluenceScore + 0  // Daily bias
     confluenceScore := ta.rsi(close, 14) > 50 ? confluenceScore + 1 : confluenceScore + 0  // RSI filter
     confluenceScore := (high - low) > ta.sma(high - low, 14) ? confluenceScore + 1 : confluenceScore + 0  // Volatility
     // Silver Bullet boost
@@ -122,20 +155,21 @@ if longFinal or shortFinal
 // ───────────────────────────────────────────────
 // Alert → Webhook Payload
 // ───────────────────────────────────────────────
+payloadSymbol = syminfo.tickerid
 if longFinal
     label.new(bar_index, low, "LONG\nScore: " + str.tostring(confluenceScore), 
               style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
-    alert(message='{"symbol":"' + syminfo.tickerid + '","direction":"long","price":' + str.tostring(close) + ',"sl_target":' + str.tostring(entryZoneMean) + ',"conviction":' + str.tostring(confluenceScore) + ',"silver_bullet":' + str.tostring(inSilverBullet) + '}', freq=alert.freq_once_per_bar_close)
+    alert(message='{"symbol":"' + payloadSymbol + '","direction":"long","price":' + str.tostring(close) + ',"sl_target":' + str.tostring(entryZoneMean) + ',"conviction":' + str.tostring(confluenceScore) + ',"silver_bullet":' + str.tostring(inSilverBullet) + ',"scenario":"' + scenario + '"}', freq=alert.freq_once_per_bar_close)
 
 if shortFinal
     label.new(bar_index, high, "SHORT\nScore: " + str.tostring(confluenceScore), 
               style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
-    alert(message='{"symbol":"' + syminfo.tickerid + '","direction":"short","price":' + str.tostring(close) + ',"sl_target":' + str.tostring(entryZoneMean) + ',"conviction":' + str.tostring(confluenceScore) + ',"silver_bullet":' + str.tostring(inSilverBullet) + '}', freq=alert.freq_once_per_bar_close)
+    alert(message='{"symbol":"' + payloadSymbol + '","direction":"short","price":' + str.tostring(close) + ',"sl_target":' + str.tostring(entryZoneMean) + ',"conviction":' + str.tostring(confluenceScore) + ',"silver_bullet":' + str.tostring(inSilverBullet) + ',"scenario":"' + scenario + '"}', freq=alert.freq_once_per_bar_close)
 
 // ───────────────────────────────────────────────
 // Dashboard on Chart
 // ───────────────────────────────────────────────
-var table dash = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 70), border_width=1)
+var table dash = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 70), border_width=1)
 if barstate.islast
     table.cell(dash, 0, 0, "Aurum Edge", text_color=color.yellow, text_size=size.small)
     table.cell(dash, 0, 1, "Step B (Sweep):", text_color=color.gray, text_size=size.auto)
@@ -152,3 +186,11 @@ if barstate.islast
     table.cell(dash, 1, 6, asiaBlocked ? "🚫" : "✔", text_color=asiaBlocked ? color.red : color.green, text_size=size.auto)
     table.cell(dash, 0, 7, "Silver Bullet:", text_color=color.gray, text_size=size.auto)
     table.cell(dash, 1, 7, inSilverBullet ? "⚡" : "—", text_color=inSilverBullet ? color.yellow : color.gray, text_size=size.auto)
+    table.cell(dash, 0, 8, "Friday:", text_color=color.gray, text_size=size.auto)
+    table.cell(dash, 1, 8, fridayWarning ? "⚠️" : "✔", text_color=fridayWarning ? color.red : color.green, text_size=size.auto)
+    table.cell(dash, 0, 9, "Scenario:", text_color=color.gray, text_size=size.auto)
+    table.cell(dash, 1, 9, scenario, text_color=scenario == "trending" or scenario == "volatile" ? color.orange : color.gray, text_size=size.auto)
+    table.cell(dash, 0, 10, "Bias:", text_color=color.gray, text_size=size.auto)
+    table.cell(dash, 1, 10, dailyBias, text_color=dailyBias == "long" ? color.green : color.red, text_size=size.auto)
+    table.cell(dash, 0, 11, "SL Mult:", text_color=color.gray, text_size=size.auto)
+    table.cell(dash, 1, 11, str.tostring(slMult), text_color=color.white, text_size=size.auto)

@@ -63,6 +63,24 @@ SILVER_BULLET_START = 13 + 50/60.0  # 13:50 UTC
 SILVER_BULLET_END = 14 + 10/60.0   # 14:10 UTC
 SILVER_BULLET_BOOST = 1.5  # Conviction boost
 
+# Weekend Gap Risk — Friday hard close + Sunday block
+FRIDAY_HARD_CLOSE_UTC = 20.5  # 4:30 PM ET Friday
+SUNDAY_ENTRY_BLOCK_UTC = 21.0  # No entries before 5:00 PM ET Sunday (market opens 6 PM ET)
+FRIDAY_EARLY_STOP_UTC = 17.0  # No new entries after 1:00 PM ET Friday
+
+# Daily Bias — trade with the larger trend
+DAILY_BIAS_FAST_EMA = 9
+DAILY_BIAS_SLOW_EMA = 20
+DAILY_BIAS_BOOST = 1.0  # Conviction boost when aligned with daily bias
+
+# Scenario Detection
+SCENARIOS = {
+    "trending": {"min_atr_pct": 0.008, "min_daily_range_pct": 0.015},
+    "ranging": {"max_atr_pct": 0.005, "min_daily_range_pct": 0.008},
+    "volatile": {"min_atr_pct": 0.012},
+    "quiet": {"max_atr_pct": 0.003, "max_daily_range_pct": 0.006},
+}
+
 # Risk & Correlation Protection
 MAX_CONCURRENT_POSITIONS = 1
 MAX_CURRENCY_EXPOSURE = 1

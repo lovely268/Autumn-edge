@@ -25,6 +25,7 @@ TOTAL_DRAWDOWN = ACCOUNT_SIZE * 0.06  # $1500 total drawdown
 INSTRUMENTS = {
     "MGC": {"point_value": 10.0, "tick_size": 0.1, "max_contracts": 8, "name": "Micro Gold"},
     "MES": {"point_value": 5.0,  "tick_size": 0.25, "max_contracts": 6, "name": "Micro S&P 500"},
+    "MNQ": {"point_value": 2.0,  "tick_size": 0.25, "max_contracts": 10, "name": "Micro Nasdaq 100"},
 }
 
 

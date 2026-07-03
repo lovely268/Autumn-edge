@@ -1,5 +1,6 @@
 import yfinance as yf
 import pandas as pd
+import numpy as np
 from datetime import datetime, timezone
 import config
 from scorer import InstitutionalScorer
@@ -121,6 +122,119 @@ class DataPipeline:
             self.session_boundaries['pd']['high'] = float(prev_day_data['High'].max())
             self.session_boundaries['pd']['low'] = float(prev_day_data['Low'].min())
             self.session_boundaries['pd']['date'] = str(prev_date)
+
+    def detect_regime(self):
+        """
+        Phase 2: Market Regime Detection.
+        Detects trending/ranging/volatile using ATR ratio, ADX(14), Bollinger Band width.
+        Returns a market_regime dict with recommended_action parameters.
+        """
+        if self.mtf_data.empty or len(self.mtf_data) < 20:
+            return {
+                "regime": "trending",
+                "atr_ratio": 1.0,
+                "adx": 25.0,
+                "bb_width_percentile": 50,
+                "bb_pct_b": 0.5,
+                "squeeze_detected": False,
+                "recommended_action": {
+                    "size_modifier": 1.0,
+                    "sl_multiplier": 1.0,
+                    "allow_breakout": True,
+                    "min_conviction": 7.0
+                }
+            }
+
+        df = self.mtf_data.copy()
+
+        # ── ATR Ratio ──
+        df['h-l'] = df['High'] - df['Low']
+        df['h-pc'] = abs(df['High'] - df['Close'].shift(1))
+        df['l-pc'] = abs(df['Low'] - df['Close'].shift(1))
+        df['tr'] = df[['h-l', 'h-pc', 'l-pc']].max(axis=1)
+        df['atr'] = df['tr'].rolling(14).mean()
+        atr_current = float(df['atr'].iloc[-1]) if not df['atr'].empty and not pd.isna(df['atr'].iloc[-1]) else 0.1
+        atr_20_avg = float(df['atr'].tail(20).mean()) if len(df) >= 20 else atr_current
+        atr_ratio = atr_current / atr_20_avg if atr_20_avg > 0 else 1.0
+
+        # ── ADX (Trend Strength) ──
+        high = df['High']
+        low = df['Low']
+        close = df['Close']
+
+        plus_dm = high.diff()
+        minus_dm = low.diff()
+        plus_dm[plus_dm < 0] = 0
+        minus_dm[minus_dm > 0] = 0
+        minus_dm = abs(minus_dm)
+
+        tr = df[['h-l', 'h-pc', 'l-pc']].max(axis=1)
+        atr_14 = tr.rolling(14).mean()
+
+        plus_di = 100 * (plus_dm.ewm(alpha=1/14).mean() / atr_14)
+        minus_di = 100 * (minus_dm.ewm(alpha=1/14).mean() / atr_14)
+        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+        dx = dx.replace([np.inf, -np.inf], 0).fillna(0)
+        adx = dx.rolling(14).mean()
+        adx_val = float(adx.iloc[-1]) if not adx.empty and not pd.isna(adx.iloc[-1]) else 25.0
+
+        # ── Bollinger Bands ──
+        sma_20 = df['Close'].rolling(20).mean()
+        std_20 = df['Close'].rolling(20).std()
+        bb_upper = sma_20 + 2 * std_20
+        bb_lower = sma_20 - 2 * std_20
+        bb_width = (bb_upper - bb_lower) / sma_20
+        bb_width_pct = bb_width.rolling(100).rank(pct=True)
+        bb_width_percentile = int(float(bb_width_pct.iloc[-1]) * 100) if not bb_width_pct.empty and not pd.isna(bb_width_pct.iloc[-1]) else 50
+        bb_pct_b = float((df['Close'].iloc[-1] - bb_lower.iloc[-1]) / (bb_upper.iloc[-1] - bb_lower.iloc[-1])) if not bb_lower.empty and not pd.isna(bb_lower.iloc[-1]) and (bb_upper.iloc[-1] != bb_lower.iloc[-1]) else 0.5
+
+        # ── Squeeze Detection ──
+        squeeze_detected = bb_width_percentile < 20
+
+        # ── Regime Classification ──
+        if adx_val > 25 and atr_ratio > 0.8:
+            regime = "trending"
+            recommended_action = {
+                "size_modifier": 1.0,
+                "sl_multiplier": 1.0,
+                "allow_breakout": True,
+                "min_conviction": 7.0
+            }
+        elif atr_ratio > 1.5 or bb_width_percentile > 95:
+            regime = "volatile"
+            recommended_action = {
+                "size_modifier": 0.5,
+                "sl_multiplier": 1.5,
+                "allow_breakout": True,
+                "min_conviction": 8.5
+            }
+        elif adx_val < 20 and (bb_pct_b < 0.8 or squeeze_detected):
+            regime = "ranging"
+            recommended_action = {
+                "size_modifier": 1.0,
+                "sl_multiplier": 1.0,
+                "allow_breakout": False,   # No breakout entries in range
+                "min_conviction": 5.0
+            }
+        else:
+            # Transitional — default to trending-safe
+            regime = "trending"
+            recommended_action = {
+                "size_modifier": 1.0,
+                "sl_multiplier": 1.0,
+                "allow_breakout": True,
+                "min_conviction": 7.0
+            }
+
+        return {
+            "regime": regime,
+            "atr_ratio": round(atr_ratio, 2),
+            "adx": round(adx_val, 1),
+            "bb_width_percentile": bb_width_percentile,
+            "bb_pct_b": round(bb_pct_b, 2),
+            "squeeze_detected": squeeze_detected,
+            "recommended_action": recommended_action
+        }
 
     def get_current_state(self, macro_filters=None, cb_sentiment=0.0, economic_surprise=0.0, order_book=None):
         """Returns the current market state and session boundaries."""
@@ -294,10 +408,14 @@ class DataPipeline:
             }
             futures_setup = self.futures_engine.process_symbol(self.symbol, market_data)
 
+        # ── Market Regime Detection ──────────────
+        market_regime = self.detect_regime()
+
         return {
             'symbol': self.symbol,
             'latest_price': latest_price,
             'latest_atr': latest_atr,
+            'market_regime': market_regime,
             'ml_score': primary_score,
             'long_score': long_calc['score'],
             'short_score': short_calc['score'],
