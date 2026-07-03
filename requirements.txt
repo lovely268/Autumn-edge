@@ -1,5 +1,11 @@
+# Core
 numpy==2.5.0
-oandapyV20==0.7.2
 pandas==3.0.3
 requests==2.34.2
+
+# OANDA (legacy, keep for compatibility)
+oandapyV20==0.7.2
 yfinance==1.4.1
+
+# Railway / Server
+# (stdlib http.server is used — no Flask/FastAPI needed)

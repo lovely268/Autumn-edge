@@ -1,71 +1,96 @@
-import time
-import subprocess
+#!/usr/bin/env python3
+"""
+Aurum Edge Watchdog — Health Monitoring & Auto-Restart
+Checks the webhook server health endpoint every 5 minutes.
+Restarts the server if it becomes unresponsive.
+"""
 import os
-import logging
-from datetime import datetime
-from telegram_notify import send_telegram_message, format_status_alert
+import sys
+import time
+import json
+import subprocess
+import requests
 
-# Configuration - Relative for portability
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_DIR = os.path.join(BASE_DIR, "logs")
-WATCHDOG_LOG = os.path.join(LOG_DIR, "watchdog.log")
-PIPELINE_SCRIPT = "pipeline_service.py"
-EXECUTION_SCRIPT = "execution_agent.py"
+HEALTH_URL = "http://localhost:3000/health"
+CHECK_INTERVAL = 300  # 5 minutes
+SERVER_CMD = "python3 main.py"
 
-# Ensure log directory exists
-os.makedirs(LOG_DIR, exist_ok=True)
-
-# Setup logging
-logging.basicConfig(
-    filename=WATCHDOG_LOG,
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-
-def is_process_running(script_name):
+def check_health():
+    """Hit the /health endpoint and return parsed JSON or None."""
     try:
-        # Use ps to find processes and grep for the script name, excluding grep and watchdog itself
-        cmd = f"ps aux | grep {script_name} | grep -v grep | grep -v watchdog.py"
-        output = subprocess.check_output(cmd, shell=True)
-        return len(output) > 0
-    except subprocess.CalledProcessError:
+        resp = requests.get(HEALTH_URL, timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception as e:
+        print(f"[WATCHDOG] Health check failed: {e}", flush=True)
+    return None
+
+def check_process():
+    """Check if main.py is running."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "python3 main.py"],
+            capture_output=True, text=True, timeout=5
+        )
+        return result.returncode == 0
+    except Exception:
         return False
 
-def start_process(script_name):
-    log_file = os.path.join(LOG_DIR, script_name.replace('.py', '.log'))
-    script_path = os.path.join(BASE_DIR, script_name)
-    # Use absolute path for python3 and the script
-    cmd = f"nohup python3 -u {script_path} > {log_file} 2>&1 &"
-    logging.info(f"Restarting {script_name} with command: {cmd}")
-    subprocess.Popen(cmd, shell=True, cwd=BASE_DIR)
+def restart_server():
+    """Restart the webhook server process."""
+    print("[WATCHDOG] Restarting server...", flush=True)
+    try:
+        # Kill existing process
+        subprocess.run(["pkill", "-f", "python3 main.py"], timeout=5)
+        time.sleep(2)
+        # Start new process
+        subprocess.Popen(
+            ["python3", "main.py"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=os.path.dirname(os.path.abspath(__file__))
+        )
+        print("[WATCHDOG] Server restarted successfully", flush=True)
+    except Exception as e:
+        print(f"[WATCHDOG] Restart failed: {e}", flush=True)
 
-def monitor():
-    logging.info("Watchdog service started.")
-    print("Watchdog service started. Monitoring pipeline and execution agent...")
-    scripts = [PIPELINE_SCRIPT, EXECUTION_SCRIPT]
-    last_health_check = 0
+def main():
+    print("[WATCHDOG] Starting Aurum Edge Watchdog...", flush=True)
     
-    while True:
-        try:
-            # Run Health Audit every 30 minutes (Rule 11)
-            if time.time() - last_health_check > 1800:
-                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Running scheduled health audit...")
-                audit_path = os.path.join(BASE_DIR, "daily_health_audit.py")
-                subprocess.run(["python3", audit_path])
-                last_health_check = time.time()
+    # Initial start if not running
+    if not check_process():
+        restart_server()
+        time.sleep(5)
 
-            for script in scripts:
-                if not is_process_running(script):
-                    logging.warning(f"Process {script} is NOT running!")
-                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Warning: {script} is NOT running! Restarting...")
-                    send_telegram_message(format_status_alert(f"⚠️ <b>Service Failure:</b> {script} is not running. Attempting automatic restart..."))
-                    start_process(script)
-            
-            time.sleep(30) # Check every 30 seconds
-        except Exception as e:
-            logging.error(f"Error in watchdog loop: {e}")
-            time.sleep(10)
+    while True:
+        alive = check_process()
+        health = check_health()
+
+        if not alive:
+            print("[WATCHDOG] Server process not found. Restarting...", flush=True)
+            restart_server()
+        elif health is None:
+            print("[WATCHDOG] Health endpoint unresponsive. Restarting...", flush=True)
+            restart_server()
+        else:
+            status = health.get("status", "unknown")
+            pnl = health.get("daily_pnl", 0)
+            total = health.get("total_pnl", 0)
+            print(f"[WATCHDOG] OK — Status: {status} | Daily PnL: ${pnl:.2f} | Total: ${total:.2f}", flush=True)
+
+            # Alert if pass conditions met
+            pass_conds = health.get("pass_conditions", {})
+            if pass_conds.get("all_met", False):
+                alert_sent = health.get("pass_alert_sent", False)
+                if alert_sent:
+                    print("[WATCHDOG] 🚀 EVALUATION PASS CONDITIONS MET!", flush=True)
+
+            # Alert if account floor breached
+            if health.get("account_floor_warning", False):
+                print(f"[WATCHDOG] ⚠️ Account floor WARNING — balance near $24,000 threshold", flush=True)
+
+        time.sleep(CHECK_INTERVAL)
+
 
 if __name__ == "__main__":
-    monitor()
+    main()

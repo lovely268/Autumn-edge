@@ -1,7 +1,8 @@
 """
-Aurum Edge Webhook Server (Railway)
-Receives TradingView alert webhooks, validates signals via the Lucid Risk Engine,
-and executes trades via the Tradovate REST API with 3-part bracket order management.
+Aurum Edge Webhook + Signal Trade App Bridge (Railway)
+Receives TradingView alert webhooks → validates via Lucid Risk Engine
+→ sends validated signals to Signal Trade App for Tradovate execution.
+Also handles health checks, hard close, and evaluation status.
 """
 import os
 import json
@@ -9,219 +10,97 @@ import time
 import hmac
 import hashlib
 import logging
+import threading
+import requests as http_req
 from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 # ── Modules ────────────────────────────────────
-from tradovate_auth import TradovateAuth
 from lucid_risk_engine import LucidRiskEngine
 
 # ── Config ─────────────────────────────────────
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+STA_WEBHOOK_URL = os.getenv("STA_WEBHOOK_URL", "")
 LISTEN_HOST = "0.0.0.0"
-LISTEN_PORT = int(os.getenv("PORT", "8080"))
+LISTEN_PORT = int(os.getenv("PORT", "3000"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("webhook")
 
-# ── Tradovate API Client ──────────────────────
-class TradovateClient:
-    """Minimal REST client for placing bracket orders on Tradovate."""
-
-    BASE = "https://live.tradovateapi.com"
+# ── Signal Trade App Client ───────────────────
+class SignalTradeAppClient:
+    """Sends validated trade signals to Signal Trade App for execution."""
 
     def __init__(self):
-        self.auth = TradovateAuth()
-        self.account_id = int(os.getenv("TRADOVATE_ACCOUNT_ID", "0"))
+        self.webhook_url = STA_WEBHOOK_URL
 
-    def _ensure_token(self):
-        return self.auth.authenticate()
-
-    def find_contract(self, symbol):
-        """Resolve 'MGC' or 'MES' to the current active contract ID."""
-        token = self._ensure_token()
-        if not token:
+    def send_signal(self, payload):
+        """Forward a trade signal to the Signal Trade App webhook endpoint."""
+        if not self.webhook_url:
+            log.warning("STA_WEBHOOK_URL not configured — cannot send signal")
             return None
-        import requests
-        # Find the contract from the name pattern
-        name = f"{symbol}Z6"  # Dec 2026 — adjust as market rolls
-        resp = requests.get(
-            f"{self.BASE}/contract/find?name={name}",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            return data.get("id")
-        # Fallback: list all contracts for the product
-        product_map = {"MGC": 8846978, "MES": 756692}  # Product IDs — verify via API
-        prod_id = product_map.get(symbol)
-        if not prod_id:
-            return None
-        resp = requests.get(
-            f"{self.BASE}/contract/list?productId={prod_id}",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10
-        )
-        if resp.status_code == 200:
-            contracts = resp.json()
-            if contracts:
-                # Pick the most recent active contract
-                return contracts[-1].get("id")
-        return None
-
-    def place_bracket(self, symbol, direction, contracts, entry_price, sl_price, tp_price):
-        """
-        Place a bracket order: Limit entry + Stop Loss + Take Profit.
-        Uses Tradovate's bracketOrder endpoint.
-        """
-        token = self._ensure_token()
-        if not token:
-            log.error("Cannot place bracket: no auth token")
+        try:
+            resp = http_req.post(
+                self.webhook_url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=10
+            )
+            if resp.status_code in (200, 201):
+                log.info(f"Signal sent to STA: {payload.get('direction')} {payload.get('symbol')} -> {resp.status_code}")
+                return resp.json() if resp.text else {"status": "ok"}
+            else:
+                log.error(f"STA rejected signal: {resp.status_code} {resp.text[:200]}")
+                return None
+        except Exception as e:
+            log.error(f"STA send failed: {e}")
             return None
 
-        contract_id = self.find_contract(symbol)
-        if not contract_id:
-            log.error(f"Cannot find contract for {symbol}")
-            return None
-
-        import requests
-        bracket_payload = {
-            "accountId": self.account_id,
-            "action": "Buy" if direction == "long" else "Sell",
-            "symbol": symbol,
-            "orderQty": contracts,
-            "orderType": "Limit",
-            "price": entry_price,
-            "stopPrice": None,
-            "maxShow": contracts,
-            "pegDifference": None,
-            "timeInForce": "Day",
-            "expireTime": None,
-            "text": f"AurumEdge {direction} {symbol}",
-            "isAutomated": True,
-            "linkedOrders": [
-                {
-                    "action": "Sell" if direction == "long" else "Buy",
-                    "orderType": "Stop",
-                    "stopPrice": sl_price,
-                    "orderQty": contracts,
-                    "timeInForce": "Day",
-                    "text": "SL"
-                },
-                {
-                    "action": "Sell" if direction == "long" else "Buy",
-                    "orderType": "Limit",
-                    "price": tp_price,
-                    "orderQty": contracts,
-                    "timeInForce": "Day",
-                    "text": "TP"
-                }
-            ]
-        }
-
-        resp = requests.post(
-            f"{self.BASE}/order/placeOrder",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json=bracket_payload,
-            timeout=15
-        )
-        if resp.status_code == 200:
-            result = resp.json()
-            log.info(f"Bracket placed: {result}")
-            return result
-        else:
-            log.error(f"Bracket placement failed: {resp.status_code} {resp.text}")
-            return None
-
-    def close_all_positions(self):
-        """Flatten all open positions (hard close)."""
-        token = self._ensure_token()
-        if not token:
-            return
-        import requests
-        resp = requests.get(
-            f"{self.BASE}/position/list",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10
-        )
-        if resp.status_code != 200:
-            return
-        positions = resp.json()
-        for pos in positions:
-            if pos.get("netPos", 0) != 0:
-                close_qty = abs(pos["netPos"])
-                action = "Sell" if pos["netPos"] > 0 else "Buy"
-                payload = {
-                    "accountId": self.account_id,
-                    "action": action,
-                    "symbol": pos["symbol"],
-                    "orderQty": close_qty,
-                    "orderType": "Market",
-                    "timeInForce": "Day",
-                    "text": "HardClose AurumEdge",
-                    "isAutomated": True
-                }
-                requests.post(
-                    f"{self.BASE}/order/placeOrder",
-                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                    json=payload,
-                    timeout=10
-                )
-                log.info(f"Hard closed {close_qty} {pos['symbol']}")
-
-    def modify_stop_loss(self, order_id, new_sl_price):
-        """Modify stop loss on an existing order to trail or move to BE."""
-        token = self._ensure_token()
-        if not token:
-            return False
-        import requests
+    def close_position(self, symbol):
+        """Signal to close/exit a position on Signal Trade App."""
         payload = {
-            "orderId": order_id,
-            "stopPrice": new_sl_price,
-            "clOrdId": None
+            "action": "close",
+            "symbol": symbol,
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
-        resp = requests.post(
-            f"{self.BASE}/order/modifyOrder",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json=payload,
-            timeout=10
-        )
-        return resp.status_code == 200
+        return self.send_signal(payload)
 
 
 # ── Webhook Handler ────────────────────────────
 class WebhookHandler(BaseHTTPRequestHandler):
-    tradovate = TradovateClient()
+    sta = SignalTradeAppClient()
     risk_engine = LucidRiskEngine()
+
+    def do_GET(self):
+        path = urlparse(self.path).path
+        if path == "/health":
+            status = self.risk_engine.get_status()
+            self._respond(200, status)
+        elif path == "/":
+            self._respond(200, {"service": "Aurum Edge Webhook", "version": "2.0"})
+        else:
+            self._respond(404, {"error": "not_found"})
 
     def do_POST(self):
         path = urlparse(self.path).path
         content_len = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_len)
 
-        # Healthcheck
-        if path == "/health":
-            self._respond(200, {"status": "ok", "engine": "Aurum Edge v2.0"})
-            return
-
-        # Webhook endpoint
         if path == "/webhook":
             self._handle_webhook(body)
-            return
-
-        self._respond(404, {"error": "not_found"})
+        else:
+            self._respond(404, {"error": "not_found"})
 
     def _handle_webhook(self, raw_body):
-        """Process incoming TradingView alert."""
+        """Process incoming TradingView alert and forward to STA."""
         try:
             payload = json.loads(raw_body)
         except json.JSONDecodeError:
             self._respond(400, {"error": "invalid_json"})
             return
 
-        # Validate signature if secret is set
+        # Validate signature if secret set
         if WEBHOOK_SECRET:
             sig = self.headers.get("X-TradingView-Signature", "")
             expected = hmac.new(WEBHOOK_SECRET.encode(), raw_body, hashlib.sha256).hexdigest()
@@ -233,6 +112,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         direction = payload.get("direction")
         price = float(payload.get("price", 0))
         conviction = float(payload.get("conviction", 0))
+        sl_target = float(payload.get("sl_target", 0))
 
         if not symbol or not direction or price <= 0:
             self._respond(400, {"error": "missing_fields"})
@@ -240,104 +120,133 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         log.info(f"Signal: {direction.upper()} {symbol} @ {price} (conviction: {conviction}/10)")
 
-        # ── Lucid Risk Gate ──
+        # ── Lucid Risk Gate ──────────────────────
         gate_result = self.risk_engine.check_gate(symbol, direction, price, conviction)
         if not gate_result["allowed"]:
             log.warning(f"GATE BLOCKED: {gate_result['reason']}")
             self._respond(200, {"status": "blocked", "reason": gate_result["reason"]})
             return
 
-        # ── Kelly Criterion Sizing ──
+        # ── Kelly Criterion Sizing ───────────────
         contracts = self.risk_engine.calculate_contracts(symbol, direction, price, conviction)
         if contracts <= 0:
             log.warning("Sizing returned 0 contracts — aborting")
             self._respond(200, {"status": "blocked", "reason": "zero_contracts"})
             return
 
-        # ── Determine SL/TP from ATR or signal ──
-        sl_target = float(payload.get("sl_target", 0))
+        # ── Determine SL/TP from ATR / signal ────
         if sl_target > 0:
             sl_dist = abs(price - sl_target)
         else:
             sl_dist = price * 0.005  # fallback 0.5%
 
-        tp_price = price + (sl_dist * 3.0) if direction == "long" else price - (sl_dist * 3.0)
+        tp1_price = price + (sl_dist * 1.5) if direction == "long" else price - (sl_dist * 1.5)
+        tp2_price = price + (sl_dist * 3.0) if direction == "long" else price - (sl_dist * 3.0)
 
-        # ── 3-Part Bracket Placement ──
+        # ── Build STA signal payload ─────────────
         part_size = max(1, contracts // 3)
-        parts_placed = []
-        for i, (label, tp_mod) in enumerate([
-            ("TP1 (1.5R)", 1.5),
-            ("TP2 (3.0R)", 3.0),
-            ("TP3 (Trail)", None)
-        ]):
-            if i == 2:
-                tp = tp_price  # 3.0R as base trail target
-            else:
-                tp = price + (sl_dist * tp_mod) if direction == "long" else price - (sl_dist * tp_mod)
+        remaining = contracts - (2 * part_size)
 
-            qty = part_size if i < 2 else contracts - (2 * part_size)
-            if qty <= 0:
-                continue
-
-            result = self.tradovate.place_bracket(
-                symbol, direction, qty, price,
-                price - sl_dist if direction == "long" else price + sl_dist,
-                tp
-            )
-            parts_placed.append({
-                "part": label,
-                "qty": qty,
-                "order_id": result.get("orderId") if result else None,
-                "status": "placed" if result else "failed"
-            })
-
-        # ── Update risk engine state ──
-        self.risk_engine.record_entry(symbol, direction, price, contracts, conviction)
-
-        log.info(f"Executed {direction.upper()} {contracts}x {symbol}: {parts_placed}")
-        self._respond(200, {
-            "status": "executed",
+        sta_payload = {
+            "action": "entry",
             "symbol": symbol,
             "direction": direction,
             "contracts": contracts,
+            "entry": {
+                "type": "limit",
+                "price": price
+            },
+            "stopLoss": {
+                "price": price - sl_dist if direction == "long" else price + sl_dist
+            },
+            "takeProfits": [],
             "conviction": conviction,
-            "parts": parts_placed,
-            "risk_pct": round(gate_result.get("risk_pct", 0) * 100, 2)
-        })
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+        # Part 1: 1.5R
+        if part_size > 0:
+            sta_payload["takeProfits"].append({
+                "contracts": part_size,
+                "price": tp1_price,
+                "label": "TP1_1.5R"
+            })
+        # Part 2: 3.0R
+        if part_size > 0:
+            sta_payload["takeProfits"].append({
+                "contracts": part_size,
+                "price": tp2_price,
+                "label": "TP2_3.0R"
+            })
+        # Part 3: trailing (handled by STA or will be managed server-side)
+        if remaining > 0:
+            sta_payload["takeProfits"].append({
+                "contracts": remaining,
+                "price": tp2_price,
+                "label": "TP3_TRAIL",
+                "trailing": True,
+                "trailOffset": sl_dist  # 1x ATR trail
+            })
+
+        # ── Send to Signal Trade App ────────────
+        result = self.sta.send_signal(sta_payload)
+        self.risk_engine.record_entry(symbol, direction, price, contracts, conviction)
+
+        if result:
+            log.info(f"Signal executed: {direction.upper()} {contracts}x {symbol}")
+            self._respond(200, {
+                "status": "executed",
+                "symbol": symbol,
+                "direction": direction,
+                "contracts": contracts,
+                "conviction": conviction,
+                "sta_response": result
+            })
+        else:
+            log.error(f"STA signal delivery failed for {symbol}")
+            self._respond(502, {"status": "failed", "reason": "sta_delivery_failed"})
 
     def _respond(self, code, data):
+        body = json.dumps(data).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
-        self.wfile.write(json.dumps(data).encode())
+        self.wfile.write(body)
 
     def log_message(self, fmt, *args):
         log.info(f"{self.address_string()} - {fmt % args}")
 
 
-# ── Hard Close Scheduler (background thread) ──
+# ── Hard Close Scheduler ───────────────────────
 def hard_close_scheduler():
-    """Check every minute and hard close at 16:30 ET (20:30 UTC)."""
+    """Check every minute and send close signals at 16:30 ET (20:30 UTC)."""
+    sta = SignalTradeAppClient()
+    symbols = ["MGC", "MES"]
     while True:
         now = datetime.now(timezone.utc)
         hour_min = now.hour * 60 + now.minute
         target = 20 * 60 + 30  # 20:30 UTC = 16:30 ET
-        if hour_min >= target and hour_min < target + 2:
-            log.info("Hard close time reached — flattening all positions")
-            client = TradovateClient()
-            client.close_all_positions()
-        time.sleep(60)
+        if target <= hour_min < target + 3:
+            log.info("Hard close time reached — closing all positions via STA")
+            for sym in symbols:
+                sta.close_position(sym)
+            time.sleep(120)  # Wait 2 min before checking again
+        time.sleep(30)
 
 
 # ── Main ───────────────────────────────────────
-if __name__ == "__main__":
-    import threading
-
+def main():
+    """Start the webhook server and hard close scheduler."""
     # Start hard close scheduler
     t = threading.Thread(target=hard_close_scheduler, daemon=True)
     t.start()
 
     server = HTTPServer((LISTEN_HOST, LISTEN_PORT), WebhookHandler)
-    log.info(f"Aurum Edge Webhook Server listening on {LISTEN_HOST}:{LISTEN_PORT}")
+    log.info(f"Aurum Edge Webhook listening on {LISTEN_HOST}:{LISTEN_PORT}")
+    log.info(f"STA Webhook URL: {'configured' if STA_WEBHOOK_URL else 'NOT CONFIGURED'}")
     server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

@@ -45,8 +45,10 @@ class LucidRiskEngine:
             "pause_until": None,
             "positions": {},
             "trades_today": 0,
+            "trading_days": [],          # List of date strings with at least one trade
             "daily_high_watermark": ACCOUNT_SIZE,
             "peak_balance": ACCOUNT_SIZE,
+            "pass_alert_sent": False,    # True once pass SMS has been sent
         }
         if os.path.exists(STATE_PATH):
             with open(STATE_PATH) as f:
@@ -70,6 +72,8 @@ class LucidRiskEngine:
             self.state["daily_high_watermark"] = self.state["balance"]
             self.state["last_date"] = today
             self.state["pause_until"] = None
+            # Daily check: pass alert? No — only on significant events
+            self._check_pass_conditions()
             self._save_state()
 
     # ── Rule Checks ──
@@ -175,6 +179,11 @@ class LucidRiskEngine:
 
     # ── State Recording ──
     def record_entry(self, symbol, direction, price, contracts, conviction):
+        today = str(date.today())
+        # Track trading days — add the current date if not already present
+        if today not in self.state["trading_days"]:
+            self.state["trading_days"].append(today)
+
         self.state["positions"][symbol] = {
             "direction": direction,
             "price": price,
@@ -183,6 +192,7 @@ class LucidRiskEngine:
             "entry_time": datetime.now(timezone.utc).isoformat()
         }
         self.state["trades_today"] += 1
+        self._check_pass_conditions()
         self._save_state()
 
     def record_exit(self, symbol, pnl, pnl_pct):
@@ -208,26 +218,70 @@ class LucidRiskEngine:
 
         # Remove from active positions
         self.state["positions"].pop(symbol, None)
+        self._check_pass_conditions()
         self._save_state()
+
+    # ── Pass Condition Checking ──
+    def _check_pass_conditions(self):
+        """
+        Check all 4 Lucid Flex evaluation pass conditions.
+        If ALL met and alert not yet sent, return alert message.
+        """
+        profit_ok = self.state["total_pnl"] >= 1250
+        consistency_ok = self._consistency_check()
+        floor_ok = self.state["balance"] >= ACCOUNT_FLOOR
+        days_ok = len(self.state.get("trading_days", [])) >= 2
+
+        all_met = profit_ok and consistency_ok and floor_ok and days_ok
+
+        if all_met and not self.state.get("pass_alert_sent", False):
+            self.state["pass_alert_sent"] = True
+            self._save_state()
+            msg = "EVALUATION PASS CONDITIONS MET — Log into Lucid dashboard and request pass NOW"
+            print(f"🚀 {msg}", flush=True)
+            return msg
+
+        if all_met:
+            return "PASS_CONDITIONS_MET_ALREADY_NOTIFIED"
+
+        return None
+
+    def _consistency_check(self):
+        """Ensure largest single day <= 50% of total profit."""
+        total_abs = sum(abs(v) for v in self.state["consistency_days"].values()) + abs(self.state["daily_pnl"])
+        if total_abs <= 0:
+            return True
+        max_day_pct = max(
+            [abs(v) / total_abs for v in self.state["consistency_days"].values()] +
+            [abs(self.state["daily_pnl"]) / total_abs] * (1 if self.state["daily_pnl"] != 0 else 0)
+        )
+        return max_day_pct <= CONSISTENCY_MAX_PCT
 
     # ── Status / Health ──
     def get_status(self):
         """Return a dict for health_check / dashboard."""
         self._reset_if_new_day()
-        remaining_target = max(0, DAILY_PROFIT_TARGET - self.state["daily_pnl"])
+        remaining_target = max(0, 1250 - self.state["total_pnl"])
         remaining_cap = max(0, DAILY_PROFIT_CAP - self.state["daily_pnl"])
         drawdown = ACCOUNT_SIZE - self.state["balance"]
-        peak_to_dd = (self.state["peak_balance"] - self.state["balance"]) / self.state["peak_balance"] * 100
+        peak_to_dd = (self.state["peak_balance"] - self.state["balance"]) / self.state["peak_balance"] * 100 if self.state["peak_balance"] > 0 else 0
 
-        # Consistency calculation
-        total_abs = sum(abs(v) for v in self.state["consistency_days"].values()) + abs(self.state["daily_pnl"])
-        consistency_ok = True
-        if total_abs > 0 and self.state["daily_pnl"] != 0:
-            today_pct = abs(self.state["daily_pnl"]) / total_abs
-            consistency_ok = today_pct <= CONSISTENCY_MAX_PCT
+        profit_ok = self.state["total_pnl"] >= 1250
+        consistency_ok = self._consistency_check()
+        floor_ok = self.state["balance"] >= ACCOUNT_FLOOR
+        days_ok = len(self.state.get("trading_days", [])) >= 2
+        pass_conditions = {
+            "profit_target_1250": profit_ok,
+            "consistency_50pct": consistency_ok,
+            "account_floor_24k": floor_ok,
+            "min_trading_days_2": days_ok,
+            "all_met": all([profit_ok, consistency_ok, floor_ok, days_ok])
+        }
 
         return {
-            "status": "PASSING" if self.state["total_pnl"] >= 1250 else "ACTIVE",
+            "status": "PASSED" if profit_ok and consistency_ok and floor_ok and days_ok else "ACTIVE",
+            "service": "Aurum Edge Webhook",
+            "version": "2.0",
             "balance": round(self.state["balance"], 2),
             "daily_pnl": round(self.state["daily_pnl"], 2),
             "total_pnl": round(self.state["total_pnl"], 2),
@@ -238,9 +292,11 @@ class LucidRiskEngine:
             "account_floor_warning": self.state["balance"] <= ACCOUNT_FLOOR_WARN,
             "consecutive_losses": self.state["consecutive_losses"],
             "pause_active": self.state.get("pause_until") is not None,
-            "consistency_check": "PASS" if consistency_ok else "WARN",
+            "trading_days": len(self.state.get("trading_days", [])),
             "trades_today": self.state["trades_today"],
             "open_positions": len(self.state["positions"]),
+            "pass_conditions": pass_conditions,
+            "pass_alert_sent": self.state.get("pass_alert_sent", False),
         }
 
 
