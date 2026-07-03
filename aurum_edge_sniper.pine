@@ -10,14 +10,14 @@ mgcMaxStopTicks = 40  // MGC maximum stop in ticks
 silverBulletStart = timestamp(year, month, dayofmonth, 13, 50, 0)  // 13:50 UTC
 silverBulletEnd   = timestamp(year, month, dayofmonth, 14, 10, 0)  // 14:10 UTC
 inSilverBullet = time >= silverBulletStart and time < silverBulletEnd
-bgcolor(inSilverBullet ? color.new(color.yellow, 85) : na, title="Silver Bullet Window")
+bgcolor(inSilverBullet ? color.new(color.yellow, 85) : color(na), title="Silver Bullet Window")
 
 // ── Friday Warning ──────────────────────────────
 isFriday = dayofweek == dayofweek.friday
 fridayEarlyStop = timestamp(year, month, dayofmonth, 17, 0, 0)  // 1:00 PM ET = 17:00 UTC
 afterFridayStop = time >= fridayEarlyStop
 fridayWarning = isFriday and afterFridayStop
-bgcolor(fridayWarning ? color.new(color.red, 70) : na, title="Friday Warning")
+bgcolor(fridayWarning ? color.new(color.red, 70) : color(na), title="Friday Warning")
 
 // ── Sunday Entry Block ──────────────────────────
 isSunday = dayofweek == dayofweek.sunday
@@ -121,8 +121,8 @@ if displacementShort
             obMean := (high[i] + low[i]) / 2
             break
 
-bgcolor(fvgBull ? color.new(color.green, 85) : na, title="Bullish FVG")
-bgcolor(fvgBear ? color.new(color.red, 85) : na, title="Bearish FVG")
+bgcolor(fvgBull ? color.new(color.green, 85) : color(na), title="Bullish FVG")
+bgcolor(fvgBear ? color.new(color.red, 85) : color(na), title="Bearish FVG")
 
 // ───────────────────────────────────────────────
 // Confluence Detection → Fire Webhook Signal
@@ -170,25 +170,25 @@ if shortFinal
 var table dash = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 70), border_width=1)
 if barstate.islast
     table.cell(dash, 0, 0, "Aurum Edge", text_color=color.yellow, text_size=size.small)
-    table.cell(dash, 0, 1, "Step B (Sweep):", text_color=color.gray, text_size=size.auto)
-    table.cell(dash, 1, 1, sweepLong or sweepShort ? "✔" : "—", text_color=sweepLong or sweepShort ? color.green : color.gray, text_size=size.auto)
-    table.cell(dash, 0, 2, "Step C (Disp):", text_color=color.gray, text_size=size.auto)
-    table.cell(dash, 1, 2, displacementLong or displacementShort ? "✔" : "—", text_color=displacementLong or displacementShort ? color.green : color.gray, text_size=size.auto)
-    table.cell(dash, 0, 3, "Step D (MSS):", text_color=color.gray, text_size=size.auto)
-    table.cell(dash, 1, 3, mssLong or mssShort ? "✔" : "—", text_color=mssLong or mssShort ? color.green : color.gray, text_size=size.auto)
-    table.cell(dash, 0, 4, "Step E (Zone):", text_color=color.gray, text_size=size.auto)
-    table.cell(dash, 1, 4, fvgBull or fvgBear ? "✔" : "—", text_color=fvgBull or fvgBear ? color.green : color.gray, text_size=size.auto)
-    table.cell(dash, 0, 5, "Confluence:", text_color=color.gray, text_size=size.auto)
-    table.cell(dash, 1, 5, str.tostring(confluenceScore) + "/10", text_color=confluenceScore >= 7 ? color.green : color.orange, text_size=size.auto)
-    table.cell(dash, 0, 6, "Asia:", text_color=color.gray, text_size=size.auto)
-    table.cell(dash, 1, 6, asiaBlocked ? "🚫" : "✔", text_color=asiaBlocked ? color.red : color.green, text_size=size.auto)
-    table.cell(dash, 0, 7, "Silver Bullet:", text_color=color.gray, text_size=size.auto)
-    table.cell(dash, 1, 7, inSilverBullet ? "⚡" : "—", text_color=inSilverBullet ? color.yellow : color.gray, text_size=size.auto)
-    table.cell(dash, 0, 8, "Friday:", text_color=color.gray, text_size=size.auto)
-    table.cell(dash, 1, 8, fridayWarning ? "⚠️" : "✔", text_color=fridayWarning ? color.red : color.green, text_size=size.auto)
-    table.cell(dash, 0, 9, "Scenario:", text_color=color.gray, text_size=size.auto)
-    table.cell(dash, 1, 9, scenario, text_color=scenario == "trending" or scenario == "volatile" ? color.orange : color.gray, text_size=size.auto)
-    table.cell(dash, 0, 10, "Bias:", text_color=color.gray, text_size=size.auto)
-    table.cell(dash, 1, 10, dailyBias, text_color=dailyBias == "long" ? color.green : color.red, text_size=size.auto)
-    table.cell(dash, 0, 11, "SL Mult:", text_color=color.gray, text_size=size.auto)
-    table.cell(dash, 1, 11, str.tostring(slMult), text_color=color.white, text_size=size.auto)
+    table.cell(dash, 0, 1, "Step B (Sweep):", text_color=color.gray)
+    table.cell(dash, 1, 1, sweepLong or sweepShort ? "✔" : "—", text_color=sweepLong or sweepShort ? color.green : color.gray)
+    table.cell(dash, 0, 2, "Step C (Disp):", text_color=color.gray)
+    table.cell(dash, 1, 2, displacementLong or displacementShort ? "✔" : "—", text_color=displacementLong or displacementShort ? color.green : color.gray)
+    table.cell(dash, 0, 3, "Step D (MSS):", text_color=color.gray)
+    table.cell(dash, 1, 3, mssLong or mssShort ? "✔" : "—", text_color=mssLong or mssShort ? color.green : color.gray)
+    table.cell(dash, 0, 4, "Step E (Zone):", text_color=color.gray)
+    table.cell(dash, 1, 4, fvgBull or fvgBear ? "✔" : "—", text_color=fvgBull or fvgBear ? color.green : color.gray)
+    table.cell(dash, 0, 5, "Confluence:", text_color=color.gray)
+    table.cell(dash, 1, 5, str.tostring(confluenceScore) + "/10", text_color=confluenceScore >= 7 ? color.green : color.orange)
+    table.cell(dash, 0, 6, "Asia:", text_color=color.gray)
+    table.cell(dash, 1, 6, asiaBlocked ? "🚫" : "✔", text_color=asiaBlocked ? color.red : color.green)
+    table.cell(dash, 0, 7, "Silver Bullet:", text_color=color.gray)
+    table.cell(dash, 1, 7, inSilverBullet ? "⚡" : "—", text_color=inSilverBullet ? color.yellow : color.gray)
+    table.cell(dash, 0, 8, "Friday:", text_color=color.gray)
+    table.cell(dash, 1, 8, fridayWarning ? "⚠️" : "✔", text_color=fridayWarning ? color.red : color.green)
+    table.cell(dash, 0, 9, "Scenario:", text_color=color.gray)
+    table.cell(dash, 1, 9, scenario, text_color=scenario == "trending" or scenario == "volatile" ? color.orange : color.gray)
+    table.cell(dash, 0, 10, "Bias:", text_color=color.gray)
+    table.cell(dash, 1, 10, dailyBias, text_color=dailyBias == "long" ? color.green : color.red)
+    table.cell(dash, 0, 11, "SL Mult:", text_color=color.gray)
+    table.cell(dash, 1, 11, str.tostring(slMult), text_color=color.white)
