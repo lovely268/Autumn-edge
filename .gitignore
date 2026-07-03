@@ -14,6 +14,7 @@ portfolio.json
 market_state.json
 health_status.json
 .cred
+.env
 
 # Logs and data
 logs/
