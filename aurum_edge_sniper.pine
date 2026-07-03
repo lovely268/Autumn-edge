@@ -138,19 +138,17 @@ notBlockedByGates = not asiaBlocked and not fridayWarning and not sundayBlocked
 // Direction check against daily bias
 biasAligned = (dailyBias == "long" and longSignal) or (dailyBias == "short" and shortSignal)
 
-// Confluence Score (0-10)
-var int confluenceScore = 0
+// Confluence Score (0-10) — single expression, no := needed in v6
 longFinal = longSignal and notBlockedByGates
 shortFinal = shortSignal and notBlockedByGates
-if longFinal or shortFinal
-    confluenceScore := 4  // Base: all 5 steps met
-    confluenceScore := bodySize > 2 * avgBody ? confluenceScore + 2 : confluenceScore + 1  // Strong displacement
-    confluenceScore := biasAligned ? confluenceScore + 2 : confluenceScore  // Daily bias
-    confluenceScore := ta.rsi(close, 14) > 50 ? confluenceScore + 1 : confluenceScore  // RSI filter
-    confluenceScore := (high - low) > ta.sma(high - low, 14) ? confluenceScore + 1 : confluenceScore  // Volatility
-    // Silver Bullet boost
-    if inSilverBullet
-        confluenceScore := math.min(10, confluenceScore + 2)
+confluenceScore = longFinal or shortFinal ? math.min(10, 
+    4 +
+    (bodySize > 2 * avgBody ? 2 : 1) +
+    (biasAligned ? 2 : 0) +
+    (ta.rsi(close, 14) > 50 ? 1 : 0) +
+    ((high - low) > ta.sma(high - low, 14) ? 1 : 0) +
+    (inSilverBullet ? 2 : 0)
+) : 0
 
 // ───────────────────────────────────────────────
 // Alert → Webhook Payload
