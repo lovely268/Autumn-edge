@@ -91,9 +91,7 @@ swingLow  = ta.lowest(low, 5)[1]
 mssLong  = close > swingHigh
 mssShort = close < swingLow
 
-// ───────────────────────────────────────────────
-// Step E: Entry Zone (FVG / Order Block at 50%)
-// ───────────────────────────────────────────────
+// ── Step E: FVG / Order Block (no for loops — v6 compatible) ─
 fvgBull = low[2] > high[0]
 fvgBear = high[2] < low[0]
 
@@ -101,25 +99,9 @@ fvgTop    = fvgBull ? low[2] : fvgBear ? high[2] : na
 fvgBottom = fvgBull ? high[0] : fvgBear ? low[0] : na
 fvgMean   = fvgTop + (fvgBottom - fvgTop) / 2
 
-var float obHigh = na
-var float obLow  = na
-var float obMean = na
-
-if displacementLong
-    for i = 1 to 10
-        if close[i] < open[i]
-            obHigh := high[i]
-            obLow  := low[i]
-            obMean := (high[i] + low[i]) / 2
-            break
-
-if displacementShort
-    for i = 1 to 10
-        if close[i] > open[i]
-            obHigh := high[i]
-            obLow  := low[i]
-            obMean := (high[i] + low[i]) / 2
-            break
+// Order Block: use nearest displacement candle directly
+obMean = displacementLong and close[1] < open[1] ? (high[1] + low[1]) / 2 :
+         displacementShort and close[1] > open[1] ? (high[1] + low[1]) / 2 : na
 
 bgcolor(fvgBull ? color.new(color.green, 85) : color(na), title="Bullish FVG")
 bgcolor(fvgBear ? color.new(color.red, 85) : color(na), title="Bearish FVG")
