@@ -148,21 +148,21 @@ class WebhookHandler(BaseHTTPRequestHandler):
         remaining = contracts - (2 * part_size)
         sl_price = price - sl_dist if direction == "long" else price + sl_dist
 
-        # STA expects flat key/value format
+        # STA expects nested bracket object format
         sta_action = "buy" if direction == "long" else "sell"
         sta_payload = {
             "action": sta_action,
-            "symbol": symbol,
-            "qty": str(contracts),
+            "symbol": "MGC" if "MGC" in symbol else "MES",
+            "qty": contracts,
             "orderType": "limit",
-            "price": str(round(price, 2)),
-            "stopLoss": str(round(sl_price, 2)),
-            "takeProfit1": str(round(tp1_price, 2)),
-            "takeProfit2": str(round(tp2_price, 2)),
-            "takeProfit3Trail": "true",
-            "takeProfit3TrailOffset": str(round(sl_dist, 2)),
-            "comment": f"AurumEdge_{direction.upper()}",
-            "conviction": conviction
+            "price": price,
+            "stopLoss": sl_price,
+            "takeProfit": round(tp1_price, 2),
+            "bracket1": {
+                "target": round(tp2_price, 2),
+                "stop": sl_price
+            },
+            "comment": f"AurumEdge_{direction.upper()}"
         }
 
         # ── Send to Signal Trade App ────────────
