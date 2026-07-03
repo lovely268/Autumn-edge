@@ -109,7 +109,7 @@ bgcolor(fvgBear ? color.new(color.red, 85) : color(na), title="Bearish FVG")
 // ───────────────────────────────────────────────
 // Confluence Detection → Fire Webhook Signal
 // ───────────────────────────────────────────────
-entryZoneMean = math.isnan(fvgMean) ? obMean : fvgMean
+entryZoneMean = nz(fvgMean, obMean)
 
 longSignal = sweepLong and displacementLong and mssLong and (low <= entryZoneMean or (fvgBull and close >= fvgBottom and close <= fvgTop))
 shortSignal = sweepShort and displacementShort and mssShort and (high >= entryZoneMean or (fvgBear and close >= fvgBottom and close <= fvgTop))
