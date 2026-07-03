@@ -16,6 +16,13 @@ from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
+# ── Config (direct imports) ────────────────────
+from config import (
+    SILVER_BULLET_START, SILVER_BULLET_END, SILVER_BULLET_BOOST,
+    ASIA_TRADING_DAYS,
+    MGC_MIN_STOP_TICKS, MGC_MAX_STOP_TICKS, MGC_TICK_SIZE
+)
+
 # ── Modules ────────────────────────────────────
 from lucid_risk_engine import LucidRiskEngine
 
@@ -120,6 +127,23 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         log.info(f"Signal: {direction.upper()} {symbol} @ {price} (conviction: {conviction}/10)")
 
+        # ── Silver Bullet Boost ──────────────────
+        now_utc = datetime.now(timezone.utc)
+        current_hour = now_utc.hour + now_utc.minute / 60.0
+        in_silver_bullet = SILVER_BULLET_START <= current_hour < SILVER_BULLET_END
+        if in_silver_bullet:
+            conviction = min(10.0, conviction + SILVER_BULLET_BOOST)
+            log.info(f"Silver Bullet window active — conviction boosted to {conviction}/10")
+
+        # ── Asia Wed-Fri Gate ────────────────────
+        asia_hour = 5.5 + 1.5/60.0  # 1:30 AM ET = 5:30 UTC
+        asia_end = 7.0  # 3:00 AM ET = 7:00 UTC
+        in_asia_window = asia_hour <= current_hour < asia_end
+        if in_asia_window and now_utc.weekday() not in ASIA_TRADING_DAYS:
+            log.warning(f"Asia window blocked — {now_utc.strftime('%A')} not in trading days {ASIA_TRADING_DAYS}")
+            self._respond(200, {"status": "blocked", "reason": "asia_blocked_wed_fri"})
+            return
+
         # ── Lucid Risk Gate ──────────────────────
         gate_result = self.risk_engine.check_gate(symbol, direction, price, conviction)
         if not gate_result["allowed"]:
@@ -139,6 +163,16 @@ class WebhookHandler(BaseHTTPRequestHandler):
             sl_dist = abs(price - sl_target)
         else:
             sl_dist = price * 0.005  # fallback 0.5%
+
+        # ── MGC Stop Widening (min 20 ticks, max 40 ticks) ──
+        if "MGC" in symbol:
+            sl_ticks = int(sl_dist / MGC_TICK_SIZE)
+            if sl_ticks < MGC_MIN_STOP_TICKS:
+                sl_dist = MGC_MIN_STOP_TICKS * MGC_TICK_SIZE
+                log.info(f"MGC stop widened to {MGC_MIN_STOP_TICKS} ticks ({sl_dist})")
+            elif sl_ticks > MGC_MAX_STOP_TICKS:
+                sl_dist = MGC_MAX_STOP_TICKS * MGC_TICK_SIZE
+                log.info(f"MGC stop capped at {MGC_MAX_STOP_TICKS} ticks ({sl_dist})")
 
         tp1_price = price + (sl_dist * 1.5) if direction == "long" else price - (sl_dist * 1.5)
         tp2_price = price + (sl_dist * 3.0) if direction == "long" else price - (sl_dist * 3.0)

@@ -47,6 +47,22 @@ CIRCUIT_BREAKER_2_LOSS_RISK = 0.005 # Reduce to 0.5% risk after 2 losses
 CIRCUIT_BREAKER_3_LOSS_PAUSE_HOURS = 4
 CIRCUIT_BREAKER_4_LOSS_HALT_DAY = True
 
+# MGC Stop Parameters — minimum 20 ticks, maximum 40 ticks
+MGC_TICK_SIZE = 0.10
+MGC_TICK_VALUE = 1.0
+MGC_MIN_STOP_TICKS = 20
+MGC_MAX_STOP_TICKS = 40
+MGC_SL_MULT = 1.0  # Pine Script default
+
+# Asia Trading Days — only Mon/Tue
+ASIA_TRADING_DAYS = [0, 1]  # Monday=0, Tuesday=1
+ASIA_RANGE_MIN_TICKS = 15  # Skip if Asia range < 15 ticks on MGC
+
+# Silver Bullet Window (9:50-10:10 AM ET = 13:50-14:10 UTC)
+SILVER_BULLET_START = 13 + 50/60.0  # 13:50 UTC
+SILVER_BULLET_END = 14 + 10/60.0   # 14:10 UTC
+SILVER_BULLET_BOOST = 1.5  # Conviction boost
+
 # Risk & Correlation Protection
 MAX_CONCURRENT_POSITIONS = 1
 MAX_CURRENCY_EXPOSURE = 1

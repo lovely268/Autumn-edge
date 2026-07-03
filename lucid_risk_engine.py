@@ -161,7 +161,7 @@ class LucidRiskEngine:
 
     # ── Position Sizing ──
     def calculate_contracts(self, symbol, direction, price, conviction):
-        """Convert risk % to number of contracts."""
+        """Convert risk % to number of contracts using tick-based stop sizing."""
         instr = INSTRUMENTS.get(symbol)
         if not instr:
             return 0
@@ -169,10 +169,19 @@ class LucidRiskEngine:
         risk_pct = self._kelly_criterion(conviction)
         risk_amount = self.state["balance"] * risk_pct
 
-        # Estimate SL distance as a fraction of price (0.5% for futures)
-        sl_dist = price * 0.005
+        # Tick-based stop sizing: min 20 ticks, max 40 ticks for MGC
+        if symbol == "MGC":
+            tick_size = 0.10
+            min_ticks = 20
+            max_ticks = 40
+            sl_ticks = max(min_ticks, min(max_ticks, int((price * 0.005) / tick_size)))
+            sl_dist = sl_ticks * tick_size
+        else:
+            sl_dist = price * 0.005
 
         point_value = instr["point_value"]
+        if sl_dist <= 0:
+            return 0
         contracts = int(risk_amount / (sl_dist * point_value))
         contracts = max(1, min(contracts, instr["max_contracts"]))
         return contracts
