@@ -109,6 +109,7 @@ class TradeJournal:
     def get_stats(self):
         """Return summary statistics for dashboard/health_check."""
         conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
         cursor = conn.execute("""
             SELECT
                 COUNT(*) as total,
@@ -122,7 +123,12 @@ class TradeJournal:
                 COALESCE(MIN(pnl), 0) as worst_trade
             FROM trades
         """)
-        stats = dict(cursor.fetchone())
+        row = cursor.fetchone()
+        stats = dict(row) if row else {
+            "total": 0, "wins": 0, "losses": 0, "breaks": 0,
+            "total_pnl": 0.0, "avg_pnl": 0.0, "avg_conviction": 0.0,
+            "best_trade": 0.0, "worst_trade": 0.0
+        }
         conn.close()
 
         total = stats["total"]
@@ -186,6 +192,7 @@ class TradeJournal:
     def get_regime_breakdown(self):
         """Return win rate breakdown by market regime."""
         conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
         cursor = conn.execute("""
             SELECT
                 regime,
@@ -208,13 +215,14 @@ class TradeJournal:
     def get_best_scenario(self):
         """Return which scenario type has the highest win rate."""
         conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
         cursor = conn.execute("""
             SELECT
                 scenario,
                 COUNT(*) as total,
                 SUM(CASE WHEN tags = 'win' THEN 1 ELSE 0 END) as wins
             FROM trades
-            WHERE scenario IS NOT NULL AND total > 5
+            WHERE scenario IS NOT NULL
             GROUP BY scenario
         """)
         rows = [dict(r) for r in cursor.fetchall()]
