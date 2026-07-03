@@ -1,0 +1,129 @@
+//@version=5
+indicator("Aurum Edge — MGC/MES Sniper", overlay=true, max_labels_count=50, max_lines_count=50)
+
+// ───────────────────────────────────────────────
+// Step A: Key Levels (Asia H/L, PDH, PDL)
+// ───────────────────────────────────────────────
+// Asia Session (UTC 00:00–04:00) = Previous bar if in that window
+asiaHigh = request.security(syminfo.tickerid, "D", high[1])
+asiaLow  = request.security(syminfo.tickerid, "D", low[1])
+pdHigh   = request.security(syminfo.tickerid, "D", high[1])
+pdLow    = request.security(syminfo.tickerid, "D", low[1])
+
+// These are simplified — on TV we use daily pivots as proxies
+plot(asiaHigh, "Asia High", color.new(color.blue, 40), 1, plot.style_circles)
+plot(asiaLow,  "Asia Low",  color.new(color.blue, 40), 1, plot.style_circles)
+plot(pdHigh,   "PD High",   color.new(color.gray, 30), 1, plot.style_line)
+plot(pdLow,    "PD Low",    color.new(color.gray, 30), 1, plot.style_line)
+
+// ───────────────────────────────────────────────
+// Step B: Sweep Detection (15M wick beyond level)
+// ───────────────────────────────────────────────
+sweepLong = (low < asiaLow or low < pdLow) and close > math.min(asiaLow, pdLow)
+sweepShort = (high > asiaHigh or high > pdHigh) and close < math.max(asiaHigh, pdHigh)
+
+plotshape(sweepLong, "Sweep Long", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(sweepShort, "Sweep Short", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// ───────────────────────────────────────────────
+// Step C: Displacement Candle (15M strong move away)
+// ───────────────────────────────────────────────
+bodySize = math.abs(close - open)
+avgBody = ta.sma(bodySize, 10)
+displacementLong = close > open and bodySize > 1.5 * avgBody
+displacementShort = close < open and bodySize > 1.5 * avgBody
+
+// ───────────────────────────────────────────────
+// Step D: Market Structure Shift (1M/5M MSS)
+// ───────────────────────────────────────────────
+// Use 5-period lookback for recent swing
+swingHigh = ta.highest(high, 5)[1]
+swingLow  = ta.lowest(low, 5)[1]
+mssLong  = close > swingHigh
+mssShort = close < swingLow
+
+// ───────────────────────────────────────────────
+// Step E: Entry Zone (FVG / Order Block at 50%)
+// ───────────────────────────────────────────────
+// Fair Value Gap detection (3-candle pattern)
+fvgBull = low[2] > high[0]   // Candle 3 low > Candle 1 high
+fvgBear = high[2] < low[0]   // Candle 3 high < Candle 1 low
+
+fvgTop    = fvgBull ? low[2] : fvgBear ? high[2] : na
+fvgBottom = fvgBull ? high[0] : fvgBear ? low[0] : na
+fvgMean   = fvgTop + (fvgBottom - fvgTop) / 2
+
+// Order Block: last opposing candle before displacement
+var float obHigh = na
+var float obLow  = na
+var float obMean = na
+
+if displacementLong
+    for i = 1 to 10
+        if close[i] < open[i]
+            obHigh := high[i]
+            obLow  := low[i]
+            obMean := (high[i] + low[i]) / 2
+            break
+
+if displacementShort
+    for i = 1 to 10
+        if close[i] > open[i]
+            obHigh := high[i]
+            obLow  := low[i]
+            obMean := (high[i] + low[i]) / 2
+            break
+
+// Box visualization for FVG
+bgcolor(fvgBull ? color.new(color.green, 85) : na, title="Bullish FVG")
+bgcolor(fvgBear ? color.new(color.red, 85) : na, title="Bearish FVG")
+
+// ───────────────────────────────────────────────
+// Confluence Detection → Fire Webhook Signal
+// ───────────────────────────────────────────────
+entryZoneMean = na(fvgMean) ? obMean : fvgMean
+
+// LONG setup: sweep + displacement + MSS + price at 50% zone
+longSignal = sweepLong and displacementLong and mssLong and (low <= entryZoneMean or (fvgBull and close >= fvgBottom and close <= fvgTop))
+
+// SHORT setup
+shortSignal = sweepShort and displacementShort and mssShort and (high >= entryZoneMean or (fvgBear and close >= fvgBottom and close <= fvgTop))
+
+// Confluence Score (0-10)
+confluenceScore = 0
+if longSignal or shortSignal
+    confluenceScore := 4  // Base: all 5 steps met
+    confluenceScore := bodySize > 2 * avgBody ? confluenceScore + 2 : confluenceScore + 1  // Strong displacement
+    confluenceScore := ta.ema(close, 20) > ta.ema(close, 50) ? confluenceScore + 2 : confluenceScore + 0  // Trend alignment
+    confluenceScore := ta.rsi(close, 14) > 50 ? confluenceScore + 1 : confluenceScore + 0  // RSI filter
+    confluenceScore := (high - low) > ta.sma(high - low, 14) ? confluenceScore + 1 : confluenceScore + 0  // Volatility
+
+// ───────────────────────────────────────────────
+// Alert → Webhook Payload
+// ───────────────────────────────────────────────
+if longSignal
+    label.new(bar_index, low, "LONG\nScore: " + str.tostring(confluenceScore), 
+              style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
+    alert(message='{"symbol":"' + syminfo.tickerid + '","direction":"long","price":' + str.tostring(close) + ',"sl_target":' + str.tostring(entryZoneMean) + ',"conviction":' + str.tostring(confluenceScore) + '}', freq=alert.freq_once_per_bar_close)
+
+if shortSignal
+    label.new(bar_index, high, "SHORT\nScore: " + str.tostring(confluenceScore), 
+              style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+    alert(message='{"symbol":"' + syminfo.tickerid + '","direction":"short","price":' + str.tostring(close) + ',"sl_target":' + str.tostring(entryZoneMean) + ',"conviction":' + str.tostring(confluenceScore) + '}', freq=alert.freq_once_per_bar_close)
+
+// ───────────────────────────────────────────────
+// Dashboard on Chart
+// ───────────────────────────────────────────────
+var table dash = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 70), border_width=1)
+if barstate.islast
+    table.cell(dash, 0, 0, "Aurum Edge", text_color=color.yellow, text_size=size.small)
+    table.cell(dash, 0, 1, "Step B (Sweep):", text_color=color.gray, text_size=size.auto)
+    table.cell(dash, 1, 1, sweepLong or sweepShort ? "✔" : "—", text_color=sweepLong or sweepShort ? color.green : color.gray, text_size=size.auto)
+    table.cell(dash, 0, 2, "Step C (Disp):", text_color=color.gray, text_size=size.auto)
+    table.cell(dash, 1, 2, displacementLong or displacementShort ? "✔" : "—", text_color=displacementLong or displacementShort ? color.green : color.gray, text_size=size.auto)
+    table.cell(dash, 0, 3, "Step D (MSS):", text_color=color.gray, text_size=size.auto)
+    table.cell(dash, 1, 3, mssLong or mssShort ? "✔" : "—", text_color=mssLong or mssShort ? color.green : color.gray, text_size=size.auto)
+    table.cell(dash, 0, 4, "Step E (Zone):", text_color=color.gray, text_size=size.auto)
+    table.cell(dash, 1, 4, fvgBull or fvgBear ? "✔" : "—", text_color=fvgBull or fvgBear ? color.green : color.gray, text_size=size.auto)
+    table.cell(dash, 0, 5, "Confluence:", text_color=color.gray, text_size=size.auto)
+    table.cell(dash, 1, 5, str.tostring(confluenceScore) + "/10", text_color=confluenceScore >= 7 ? color.green : color.orange, text_size=size.auto)

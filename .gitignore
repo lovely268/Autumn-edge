@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.py~
+*.log
+*.csv
+*.json
+!requirements.txt
+
+# State & secrets
+.tradovate_creds
+portfolio.json
+market_state.json
+health_status.json
+.cred
+
+# Logs and data
+logs/
+*.log
+backtest_results.log
+pipeline_test.log
+optimization_results_v3.log
+health.txt
+final_health.txt
+
+# OS
+.DS_Store
+Thumbs.db
