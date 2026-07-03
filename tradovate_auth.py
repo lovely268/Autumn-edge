@@ -7,8 +7,9 @@ import time
 import json
 import requests
 
-TRADOVATE_API_URL = "https://live.tradovateapi.com"
-TRADOVATE_WS_URL = "wss://live.tradovateapi.com"
+_env = os.getenv("TRADOVATE_ENV", "demo").lower()
+TRADOVATE_API_URL = f"https://{'demo' if _env == 'demo' else 'live'}.tradovateapi.com"
+TRADOVATE_WS_URL = f"wss://{'md-demo' if _env == 'demo' else 'live'}.tradovateapi.com"
 
 class TradovateAuth:
     def __init__(self):
