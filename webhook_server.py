@@ -146,47 +146,24 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # ── Build STA signal payload ─────────────
         part_size = max(1, contracts // 3)
         remaining = contracts - (2 * part_size)
+        sl_price = price - sl_dist if direction == "long" else price + sl_dist
 
+        # STA expects flat key/value format
+        sta_action = "buy" if direction == "long" else "sell"
         sta_payload = {
-            "action": "entry",
+            "action": sta_action,
             "symbol": symbol,
-            "direction": direction,
-            "contracts": contracts,
-            "entry": {
-                "type": "limit",
-                "price": price
-            },
-            "stopLoss": {
-                "price": price - sl_dist if direction == "long" else price + sl_dist
-            },
-            "takeProfits": [],
-            "conviction": conviction,
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "qty": str(contracts),
+            "orderType": "limit",
+            "price": str(round(price, 2)),
+            "stopLoss": str(round(sl_price, 2)),
+            "takeProfit1": str(round(tp1_price, 2)),
+            "takeProfit2": str(round(tp2_price, 2)),
+            "takeProfit3Trail": "true",
+            "takeProfit3TrailOffset": str(round(sl_dist, 2)),
+            "comment": f"AurumEdge_{direction.upper()}",
+            "conviction": conviction
         }
-
-        # Part 1: 1.5R
-        if part_size > 0:
-            sta_payload["takeProfits"].append({
-                "contracts": part_size,
-                "price": tp1_price,
-                "label": "TP1_1.5R"
-            })
-        # Part 2: 3.0R
-        if part_size > 0:
-            sta_payload["takeProfits"].append({
-                "contracts": part_size,
-                "price": tp2_price,
-                "label": "TP2_3.0R"
-            })
-        # Part 3: trailing (handled by STA or will be managed server-side)
-        if remaining > 0:
-            sta_payload["takeProfits"].append({
-                "contracts": remaining,
-                "price": tp2_price,
-                "label": "TP3_TRAIL",
-                "trailing": True,
-                "trailOffset": sl_dist  # 1x ATR trail
-            })
 
         # ── Send to Signal Trade App ────────────
         result = self.sta.send_signal(sta_payload)
