@@ -88,8 +88,8 @@ if not inAsiaSession and not na(asiaTrackHigh)
 pdHigh   = request.security(syminfo.tickerid, "D", high[1])
 pdLow    = request.security(syminfo.tickerid, "D", low[1])
 
-plot(asiaHigh, "Asia High", color.new(color.blue, 40), 1, plot.style_circles)
-plot(asiaLow,  "Asia Low",  color.new(color.blue, 40), 1, plot.style_circles)
+plot(asiaHigh, "Asia High", color.new(color.aqua, 0), 2, plot.style_linebr)
+plot(asiaLow,  "Asia Low",  color.new(color.aqua, 0), 2, plot.style_linebr)
 plot(pdHigh,   "PD High",   color.new(color.gray, 30), 1, plot.style_line)
 plot(pdLow,    "PD Low",    color.new(color.gray, 30), 1, plot.style_line)
 
