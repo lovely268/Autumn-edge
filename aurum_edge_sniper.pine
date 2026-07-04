@@ -56,8 +56,35 @@ else if atrPct <= 0.5
 // ───────────────────────────────────────────────
 // Step A: Key Levels (Asia H/L, PDH, PDL)
 // ───────────────────────────────────────────────
-asiaHigh = request.security(syminfo.tickerid, "D", high[1])
-asiaLow  = request.security(syminfo.tickerid, "D", low[1])
+// ── Step A: Asia Session Tracking (8 PM – 3 AM ET) ─
+etHour = hour(time, "America/New_York")
+etMin  = minute(time, "America/New_York")
+etNum  = etHour * 100 + etMin
+inAsiaSession = etNum >= 2000 or etNum < 300
+
+var float asiaTrackHigh = na
+var float asiaTrackLow  = na
+var float asiaHigh      = na
+var float asiaLow       = na
+
+// Reset tracking at 8 PM ET (session start)
+if etHour == 20 and etMin == 0
+    asiaTrackHigh := high
+    asiaTrackLow  := low
+
+// Build high/low during session
+if inAsiaSession
+    if na(asiaTrackHigh) or high > asiaTrackHigh
+        asiaTrackHigh := high
+    if na(asiaTrackLow) or low < asiaTrackLow
+        asiaTrackLow := low
+
+// Lock levels when session ends (3 AM ET)
+if not inAsiaSession and not na(asiaTrackHigh)
+    asiaHigh := asiaTrackHigh
+    asiaLow  := asiaTrackLow
+
+// ── Previous Day High/Low ───────────────────────
 pdHigh   = request.security(syminfo.tickerid, "D", high[1])
 pdLow    = request.security(syminfo.tickerid, "D", low[1])
 
@@ -92,11 +119,11 @@ mssLong  = close > swingHigh
 mssShort = close < swingLow
 
 // ── Step E: FVG / Order Block (no for loops — v6 compatible) ─
-fvgBull = low[2] > high[0]
-fvgBear = high[2] < low[0]
+fvgBull = low > high[2]    // gap UP: current low above 2-bar-ago high
+fvgBear = high < low[2]    // gap DOWN: current high below 2-bar-ago low
 
-fvgTop    = fvgBull ? low[2] : fvgBear ? high[2] : na
-fvgBottom = fvgBull ? high[0] : fvgBear ? low[0] : na
+fvgTop    = fvgBull ? low     : fvgBear ? low[2]  : na
+fvgBottom = fvgBull ? high[2] : fvgBear ? high    : na
 fvgMean   = fvgTop + (fvgBottom - fvgTop) / 2
 
 // Order Block: use nearest displacement candle directly
