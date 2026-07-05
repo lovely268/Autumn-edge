@@ -253,23 +253,18 @@ class WebhookHandler(BaseHTTPRequestHandler):
             return
 
         # ═══════════════════════════════════════════
-        # Kelly Criterion Sizing (with regime modifier)
+        # Stop Loss Determination (before sizing)
         # ═══════════════════════════════════════════
-        contracts = self.risk_engine.calculate_contracts(symbol, direction, price, conviction)
-        # Apply regime size modifier (e.g. 0.5 for volatile)
-        contracts = max(1, int(contracts * size_modifier))
-        if contracts <= 0:
-            log.warning("Sizing returned 0 contracts — aborting")
-            self._respond(200, {"status": "blocked", "reason": "zero_contracts"})
+        if sl_target <= 0:
+            log.warning(f"⛔ Missing stop distance in signal — rejecting {symbol} {direction}")
+            self._respond(200, {"status": "blocked", "reason": "missing_stop_distance"})
             return
 
-        # ═══════════════════════════════════════════
-        # Stop Loss Determination
-        # ═══════════════════════════════════════════
-        if sl_target > 0:
-            sl_dist = abs(price - sl_target)
-        else:
-            sl_dist = price * 0.005  # fallback 0.5%
+        sl_dist = abs(price - sl_target)
+        if sl_dist <= 0:
+            log.warning(f"⛔ Invalid stop distance (zero) — rejecting {symbol} {direction}")
+            self._respond(200, {"status": "blocked", "reason": "invalid_stop_distance"})
+            return
 
         # Apply regime SL multiplier
         sl_dist = sl_dist * sl_multiplier
@@ -284,6 +279,26 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 sl_dist = MGC_MAX_STOP_TICKS * MGC_TICK_SIZE
                 log.info(f"MGC stop capped at {MGC_MAX_STOP_TICKS} ticks ({sl_dist})")
 
+        # ═══════════════════════════════════════════
+        # Kelly Criterion Sizing (with regime modifier + actual stop)
+        # ═══════════════════════════════════════════
+        contracts = self.risk_engine.calculate_contracts(symbol, direction, price, conviction, sl_dist)
+        # Apply regime size modifier (e.g. 0.5 for volatile)
+        contracts = max(1, int(contracts * size_modifier))
+        if contracts <= 0:
+            log.warning("Sizing returned 0 contracts — aborting")
+            self._respond(200, {"status": "blocked", "reason": "zero_contracts"})
+            return
+
+        # Log full sizing decision for audit
+        log.info(f"SIZING: entry={price} stop={sl_dist} dist_ticks={int(sl_dist/0.10 if 'MGC' in symbol else sl_dist/0.25)} "
+                 f"risk$={self.risk_engine.state['balance'] * self.risk_engine._kelly_criterion(conviction):.2f} "
+                 f"per_contract$={sl_dist * 10.0:.2f} contracts={contracts} "
+                 f"capped={'yes' if contracts >= (8 if 'MGC' in symbol else 6) else 'no'}")
+
+        # ═══════════════════════════════════════════
+        # TP Levels (using actual sl_dist)
+        # ═══════════════════════════════════════════
         tp1_price = price + (sl_dist * 1.5) if direction == "long" else price - (sl_dist * 1.5)
         tp2_price = price + (sl_dist * 3.0) if direction == "long" else price - (sl_dist * 3.0)
 

@@ -161,8 +161,8 @@ class LucidRiskEngine:
         return max(0.005, min(0.015, risk))
 
     # ── Position Sizing ──
-    def calculate_contracts(self, symbol, direction, price, conviction):
-        """Convert risk % to number of contracts using tick-based stop sizing."""
+    def calculate_contracts(self, symbol, direction, price, conviction, sl_dist=None):
+        """Convert risk % to number of contracts using actual stop distance from signal."""
         instr = INSTRUMENTS.get(symbol)
         if not instr:
             return 0
@@ -170,14 +170,9 @@ class LucidRiskEngine:
         risk_pct = self._kelly_criterion(conviction)
         risk_amount = self.state["balance"] * risk_pct
 
-        # Tick-based stop sizing: min 20 ticks, max 40 ticks for MGC
-        if symbol == "MGC":
-            tick_size = 0.10
-            min_ticks = 20
-            max_ticks = 40
-            sl_ticks = max(min_ticks, min(max_ticks, int((price * 0.005) / tick_size)))
-            sl_dist = sl_ticks * tick_size
-        else:
+        # Use provided stop distance (already widened/capped in webhook)
+        if sl_dist is None or sl_dist <= 0:
+            # Fallback only if somehow called without a stop (should not happen)
             sl_dist = price * 0.005
 
         point_value = instr["point_value"]
