@@ -167,7 +167,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 self._respond(403, {"error": "invalid_signature"})
                 return
 
-        symbol = payload.get("symbol", "").replace("=F", "")
+        symbol = payload.get("symbol", "").replace("=F", "").replace("1!", "").replace("!", "")
         direction = payload.get("direction")
         price = float(payload.get("price", 0))
         conviction = float(payload.get("conviction", 0))
