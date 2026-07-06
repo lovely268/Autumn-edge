@@ -3,6 +3,7 @@ Aurum Edge Webhook + Signal Trade App Bridge (Railway)
 Receives TradingView alert webhooks → news blackout gate → regime gate
 → validates via Lucid Risk Engine → sends validated signals to Signal Trade App.
 Also handles health checks, hard close, and evaluation status.
+v2.1 — Session info in health, fixed exit tracking, resilient state.
 """
 import os
 import json
@@ -24,7 +25,7 @@ from config import (
 )
 
 # ── Modules ────────────────────────────────────
-from lucid_risk_engine import LucidRiskEngine
+from lucid_risk_engine import LucidRiskEngine, get_current_session
 from news_calendar_2026 import is_news_blackout, check_geopolitical_blackout, get_next_event
 from trade_journal import TradeJournal
 
@@ -97,7 +98,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 "avg_conviction": round(stats["avg_conviction"], 1),
                 "best_trade": round(stats["best_trade"], 2),
                 "worst_trade": round(stats["worst_trade"], 2),
-                "current_streak": "N/A",  # Can be derived from recent trades
+                "current_streak": "N/A",
                 "best_scenario": best_scenario,
                 "regime_breakdown": regime_breakdown,
             }
@@ -105,6 +106,27 @@ class WebhookHandler(BaseHTTPRequestHandler):
             next_event = get_next_event()
             if next_event:
                 status["next_news_event"] = next_event
+            # Add active gates summary
+            now = datetime.now(timezone.utc)
+            current_hour = now.hour + now.minute / 60.0
+            active_gates = []
+            blackout = is_news_blackout()
+            if blackout["in_blackout"]:
+                active_gates.append(f"news_blackout:{blackout['event_name']}")
+            semi_active = []
+            if SILVER_BULLET_START <= current_hour < SILVER_BULLET_END:
+                semi_active.append("silver_bullet")
+            asia_hour = 5.5 + 1.5/60.0
+            asia_end = 7.0
+            if asia_hour <= current_hour < asia_end:
+                if now.weekday() in ASIA_TRADING_DAYS:
+                    semi_active.append("asia_open")
+                else:
+                    active_gates.append("asia_blocked_wed_fri")
+            status["gates"] = {
+                "active_blockers": active_gates,
+                "active_boosters": semi_active,
+            }
             self._respond(200, status)
         elif path == "/":
             self._respond(200, {"service": "Aurum Edge Webhook", "version": "2.0"})
@@ -140,16 +162,27 @@ class WebhookHandler(BaseHTTPRequestHandler):
         pnl = float(payload.get("pnl", 0))
         pnl_pct = float(payload.get("pnl_pct", 0))
         fees = float(payload.get("fees", 0))
+        symbol = payload.get("symbol", "")
+
+        # If no trade_id, look up the last open trade for this symbol
+        if not trade_id and symbol:
+            last_trade = self.journal.get_last_open_trade_by_symbol(symbol)
+            if last_trade:
+                trade_id = last_trade["id"]
+                log.info(f"Resolved trade_id={trade_id} for {symbol} from last open trade")
 
         if trade_id:
             self.journal.log_exit(trade_id, exit_price, exit_reason, pnl, pnl_pct, fees)
-            # Also record in risk engine
-            symbol = payload.get("symbol", "")
             self.risk_engine.record_exit(symbol, pnl, pnl_pct)
-            log.info(f"Exit recorded: trade_id={trade_id} pnl=${pnl:.2f} reason={exit_reason}")
-            self._respond(200, {"status": "exit_recorded"})
+            log.info(f"Exit recorded: trade_id={trade_id} {symbol} pnl=${pnl:.2f} reason={exit_reason}")
+            self._respond(200, {"status": "exit_recorded", "trade_id": trade_id})
         else:
-            self._respond(400, {"error": "missing_trade_id"})
+            log.warning(f"Exit for {symbol} — no trade_id provided and no open trade found")
+            # Still record PnL in risk engine for balance tracking
+            if symbol:
+                self.risk_engine.record_exit(symbol, pnl, pnl_pct)
+                log.info(f"Exit recorded in risk engine only: {symbol} pnl=${pnl:.2f}")
+            self._respond(200, {"status": "exit_recorded_balance_only"})
 
     def _handle_webhook(self, raw_body):
         """Process incoming TradingView alert and forward to STA."""
@@ -384,6 +417,7 @@ def hard_close_scheduler():
     """Check every minute and send close signals at 16:30 ET (20:30 UTC)."""
     sta = SignalTradeAppClient()
     journal = TradeJournal()
+    risk_engine = LucidRiskEngine()
     symbols = ["MGC", "MES"]
     while True:
         now = datetime.now(timezone.utc)
@@ -393,15 +427,20 @@ def hard_close_scheduler():
             log.info("Hard close time reached — closing all positions via STA")
             for sym in symbols:
                 sta.close_position(sym)
-                # Journal the hard close
-                journal.log_exit(
-                    trade_id=None,  # Placeholder — real ID from STA response
-                    exit_price=0,
-                    exit_reason="hard_close",
-                    pnl=0,
-                    pnl_pct=0,
-                    notes=f"Hard close at {now.isoformat()}"
-                )
+                # Find the last open trade for this symbol and record exit
+                last_trade = journal.get_last_open_trade_by_symbol(sym)
+                if last_trade:
+                    journal.log_exit(
+                        trade_id=last_trade["id"],
+                        exit_price=0,
+                        exit_reason="hard_close",
+                        pnl=0,
+                        pnl_pct=0,
+                        notes=f"Hard close at {now.isoformat()}"
+                    )
+                    log.info(f"Hard close logged for {sym} trade_id={last_trade['id']}")
+                else:
+                    log.info(f"No open trade found for {sym} at hard close")
             time.sleep(120)  # Wait 2 min before checking again
         time.sleep(30)
 

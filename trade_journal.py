@@ -233,6 +233,24 @@ class TradeJournal:
         best["win_rate"] = round(best["wins"] / best["total"] * 100, 1) if best["total"] > 0 else 0.0
         return best
 
+    def get_last_open_trade_by_symbol(self, symbol):
+        """
+        Find the most recent trade for a symbol that hasn't been closed yet.
+        Returns dict with trade data or None.
+        Used by hard close scheduler to properly record exits.
+        """
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute("""
+            SELECT * FROM trades
+            WHERE symbol = ? AND exit_price IS NULL
+            ORDER BY timestamp_utc DESC
+            LIMIT 1
+        """, (symbol,))
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
 
 # Module-level singleton for convenience
 _journal_instance = None
