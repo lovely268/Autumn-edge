@@ -34,6 +34,29 @@ LISTEN_PORT = int(os.getenv("PORT", "3000"))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("webhook")
 
+# ── Pause toggle (external control via GET /pause and GET /resume) ──
+_bot_paused = False
+_pause_reason = None
+
+
+def is_bot_paused():
+    return _bot_paused
+
+
+def set_paused(reason="manual"):
+    global _bot_paused, _pause_reason
+    _bot_paused = True
+    _pause_reason = reason
+    log.warning(f"🤚 BOT PAUSED: {reason}")
+
+
+def set_resumed():
+    global _bot_paused, _pause_reason
+    _bot_paused = False
+    _pause_reason = None
+    log.info("▶️ BOT RESUMED")
+
+
 # ── Idempotency: dedup tracker ──
 _last_signal = {}  # key: "symbol:direction" -> timestamp_utc, orderId
 DEDUP_SECONDS = 600  # 10 min
@@ -134,6 +157,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 "last_execution_confirmed": self.risk_engine.state.get("last_execution_confirmed", False),
                 "last_execution_time": self.risk_engine.state.get("last_execution_time"),
             }
+            # Bot state
+            status["bot_state"] = {
+                "paused": _bot_paused,
+                "pause_reason": _pause_reason,
+            }
             try:
                 bs = get_balance_sync()
                 status["balance_sync"] = bs.get_sync_info()
@@ -146,6 +174,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self._respond(200, {"service": "Aurum Edge Webhook", "version": "2.2"})
         elif path == "/trades":
             self._respond(200, {"trades": self.journal.get_recent_trades(20)})
+        elif path == "/pause":
+            set_paused("manual_from_web")
+            self._respond(200, {"bot_state": "paused", "reason": _pause_reason})
+        elif path == "/resume":
+            set_resumed()
+            self._respond(200, {"bot_state": "resumed"})
         else:
             self._respond(404, {"error": "not_found"})
 
@@ -227,7 +261,13 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         log.info(f"SIGNAL: {direction.upper()} {symbol} @ {price} conviction={conviction}/10")
 
-        # ── GATE 0: Idempotency (dedup same symbol+direction within 10 min) ──
+        # ── GATE 0: Pause check ──
+        if _bot_paused:
+            log.info(f"🤚 PAUSED: signal rejected ({_pause_reason})")
+            self._respond(200, {"status": "paused", "reason": _pause_reason})
+            return
+
+        # ── GATE 0.5: Idempotency (dedup same symbol+direction within 10 min) ──
         dedup_key = f"{symbol}:{direction}"
         now = datetime.now(timezone.utc)
         last = _last_signal.get(dedup_key)
@@ -434,6 +474,8 @@ def hard_close_scheduler():
 
 # ── Main ───────────────────────────────────────
 def main():
+    # Start PAUSED — eval discovery pending
+    set_paused("eval_discovery_pending")
     try:
         risk_engine = LucidRiskEngine()
         bs = init_balance_sync(risk_engine)
