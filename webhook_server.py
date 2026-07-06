@@ -400,7 +400,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         if result:
             if isinstance(result, dict):
                 order_id = result.get("orderId") or result.get("order_id") or result.get("id")
-                execution_confirmed = bool(order_id)
+                execution_confirmed = bool(order_id) and order_id != "undefined"
             if execution_confirmed:
                 log.info(f"✅ EXECUTION CONFIRMED: orderId={order_id}")
             else:
@@ -416,7 +416,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         # ── Record entry in risk engine + store orderId ──
         self.risk_engine.record_entry(symbol, direction, price, contracts, conviction)
-        if order_id:
+        if execution_confirmed and order_id:
             self.risk_engine.state["last_order_id"] = order_id
             self.risk_engine.state["last_execution_confirmed"] = True
             self.risk_engine.state["last_execution_time"] = now.isoformat()
@@ -478,7 +478,11 @@ def hard_close_scheduler():
                 qty = pos["contracts"] if pos else 1
                 result = sta.flatten_position(sym, qty)
                 if result and (result.get("orderId") or result.get("order_id")):
-                    log.info(f"Hard close {sym} orderId={result.get('orderId') or result.get('order_id')}")
+                    oid = result.get("orderId") or result.get("order_id")
+                    if oid != "undefined":
+                        log.info(f"Hard close {sym} orderId={oid}")
+                    else:
+                        log.warning(f"Hard close {sym} — orderId='undefined' in response")
                 else:
                     log.warning(f"Hard close {sym} — no orderId in response")
             time.sleep(180)
