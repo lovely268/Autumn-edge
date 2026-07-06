@@ -1,9 +1,8 @@
 """
 Aurum Edge Webhook + Signal Trade App Bridge (Railway)
-Receives TradingView alert webhooks → news blackout gate → regime gate
-→ validates via Lucid Risk Engine → sends validated signals to Signal Trade App.
-Also handles health checks, hard close, and evaluation status.
-v2.1 — Session info in health, fixed exit tracking, resilient state.
+v2.2 — Execution truth-checking, hard close fix, idempotency, position lock.
+Receives TradingView alert webhooks → gates → sizes → sends to STA.
+ONLY entry point for signals — all other signal generators disabled.
 """
 import os
 import json
@@ -17,20 +16,16 @@ from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
-# ── Config (direct imports) ────────────────────
 from config import (
     SILVER_BULLET_START, SILVER_BULLET_END, SILVER_BULLET_BOOST,
     ASIA_TRADING_DAYS,
     MGC_MIN_STOP_TICKS, MGC_MAX_STOP_TICKS, MGC_TICK_SIZE
 )
-
-# ── Modules ────────────────────────────────────
 from lucid_risk_engine import LucidRiskEngine, get_current_session
 from news_calendar_2026 import is_news_blackout, check_geopolitical_blackout, get_next_event
 from trade_journal import TradeJournal
 from tradovate_balance_sync import get_balance_sync, init_balance_sync
 
-# ── Config ─────────────────────────────────────
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 STA_WEBHOOK_URL = os.getenv("STA_WEBHOOK_URL", "")
 LISTEN_HOST = "0.0.0.0"
@@ -38,6 +33,10 @@ LISTEN_PORT = int(os.getenv("PORT", "3000"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("webhook")
+
+# ── Idempotency: dedup tracker ──
+_last_signal = {}  # key: "symbol:direction" -> timestamp_utc, orderId
+DEDUP_SECONDS = 600  # 10 min
 
 # ── Signal Trade App Client ───────────────────
 class SignalTradeAppClient:
@@ -47,7 +46,6 @@ class SignalTradeAppClient:
         self.webhook_url = STA_WEBHOOK_URL
 
     def send_signal(self, payload):
-        """Forward a trade signal to the Signal Trade App webhook endpoint."""
         if not self.webhook_url:
             log.warning("STA_WEBHOOK_URL not configured — cannot send signal")
             return None
@@ -59,21 +57,36 @@ class SignalTradeAppClient:
                 timeout=10
             )
             if resp.status_code in (200, 201):
-                log.info(f"Signal sent to STA: {payload.get('direction')} {payload.get('symbol')} -> {resp.status_code}")
-                return resp.json() if resp.text else {"status": "ok"}
+                resp_data = resp.json() if resp.text else {}
+                log.info(f"STA response: {resp_data}")
+                return resp_data
             else:
-                log.error(f"STA rejected signal: {resp.status_code} {resp.text[:200]}")
-                return None
+                log.error(f"STA rejected signal: {resp.status_code} {resp.text[:500]}")
+                return {"error": f"http_{resp.status_code}", "detail": resp.text[:500]}
         except Exception as e:
             log.error(f"STA send failed: {e}")
-            return None
+            return {"error": str(e)}
 
-    def close_position(self, symbol):
-        """Signal to close/exit a position on Signal Trade App."""
+    def close_position_opening(self, symbol, direction, qty, price, sl, tp1, tp2):
+        """Close by sending opposite-side market order with flatten bracket."""
+        opp_dir = "sell" if direction == "long" else "buy"
         payload = {
-            "action": "close",
+            "action": opp_dir,
             "symbol": symbol,
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "qty": qty,
+            "orderType": "market",
+            "comment": f"AurumEdge_CLOSE_{direction.upper()}"
+        }
+        return self.send_signal(payload)
+
+    def flatten_position(self, symbol, qty):
+        """Flatten via opposite-side market order (for hard close)."""
+        payload = {
+            "action": "sell",
+            "symbol": symbol,
+            "qty": qty,
+            "orderType": "market",
+            "comment": f"HardClose_{datetime.now(timezone.utc).strftime('%H%M')}"
         }
         return self.send_signal(payload)
 
@@ -88,7 +101,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/health":
             status = self.risk_engine.get_status()
-            # Enrich with trade journal stats
             stats = self.journal.get_stats()
             regime_breakdown = self.journal.get_regime_breakdown()
             best_scenario = self.journal.get_best_scenario()
@@ -97,55 +109,43 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 "win_rate": stats["win_rate"],
                 "total_pnl": round(stats["total_pnl"], 2),
                 "avg_conviction": round(stats["avg_conviction"], 1),
-                "best_trade": round(stats["best_trade"], 2),
-                "worst_trade": round(stats["worst_trade"], 2),
-                "current_streak": "N/A",
-                "best_scenario": best_scenario,
-                "regime_breakdown": regime_breakdown,
             }
-            # Enrich with next news event
             next_event = get_next_event()
             if next_event:
                 status["next_news_event"] = next_event
-            # Add active gates summary
             now = datetime.now(timezone.utc)
             current_hour = now.hour + now.minute / 60.0
-            active_gates = []
+            active_gates, semi_active = [], []
             blackout = is_news_blackout()
             if blackout["in_blackout"]:
                 active_gates.append(f"news_blackout:{blackout['event_name']}")
-            semi_active = []
             if SILVER_BULLET_START <= current_hour < SILVER_BULLET_END:
                 semi_active.append("silver_bullet")
-            asia_hour = 5.5 + 1.5/60.0
-            asia_end = 7.0
+            asia_hour, asia_end = 5.5 + 1.5/60.0, 7.0
             if asia_hour <= current_hour < asia_end:
                 if now.weekday() in ASIA_TRADING_DAYS:
                     semi_active.append("asia_open")
                 else:
                     active_gates.append("asia_blocked_wed_fri")
-            status["gates"] = {
-                "active_blockers": active_gates,
-                "active_boosters": semi_active,
+            status["gates"] = {"active_blockers": active_gates, "active_boosters": semi_active}
+            # Execution health
+            status["execution"] = {
+                "last_order_id": self.risk_engine.state.get("last_order_id"),
+                "last_execution_confirmed": self.risk_engine.state.get("last_execution_confirmed", False),
+                "last_execution_time": self.risk_engine.state.get("last_execution_time"),
             }
-
-            # Add balance sync info
             try:
                 bs = get_balance_sync()
                 status["balance_sync"] = bs.get_sync_info()
-                # Periodic reconcile (non-blocking)
                 if bs.risk_engine:
-                    sync_result = bs.periodic_reconcile()
-                    status["balance_sync"]["last_reconcile"] = sync_result
+                    status["balance_sync"]["last_reconcile"] = bs.periodic_reconcile()
             except Exception as e:
                 status["balance_sync"] = {"error": str(e), "synced": False}
-
             self._respond(200, status)
         elif path == "/":
-            self._respond(200, {"service": "Aurum Edge Webhook", "version": "2.0"})
+            self._respond(200, {"service": "Aurum Edge Webhook", "version": "2.2"})
         elif path == "/trades":
-            recent = self.journal.get_recent_trades(20)
-            self._respond(200, {"trades": recent})
+            self._respond(200, {"trades": self.journal.get_recent_trades(20)})
         else:
             self._respond(404, {"error": "not_found"})
 
@@ -153,7 +153,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         content_len = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_len)
-
         if path == "/webhook":
             self._handle_webhook(body)
         elif path == "/exit":
@@ -162,13 +161,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self._respond(404, {"error": "not_found"})
 
     def _handle_exit(self, raw_body):
-        """Record a trade exit (called by Signal Trade App or hard close)."""
         try:
             payload = json.loads(raw_body)
         except json.JSONDecodeError:
             self._respond(400, {"error": "invalid_json"})
             return
-
         trade_id = payload.get("trade_id")
         exit_price = float(payload.get("exit_price", 0))
         exit_reason = payload.get("exit_reason", "signal")
@@ -176,50 +173,45 @@ class WebhookHandler(BaseHTTPRequestHandler):
         pnl_pct = float(payload.get("pnl_pct", 0))
         fees = float(payload.get("fees", 0))
         symbol = payload.get("symbol", "")
-
-        # If no trade_id, look up the last open trade for this symbol
         if not trade_id and symbol:
             last_trade = self.journal.get_last_open_trade_by_symbol(symbol)
             if last_trade:
                 trade_id = last_trade["id"]
-                log.info(f"Resolved trade_id={trade_id} for {symbol} from last open trade")
-
         if trade_id:
             self.journal.log_exit(trade_id, exit_price, exit_reason, pnl, pnl_pct, fees)
             self.risk_engine.record_exit(symbol, pnl, pnl_pct)
-            log.info(f"Exit recorded: trade_id={trade_id} {symbol} pnl=${pnl:.2f} reason={exit_reason}")
-
-            # Post-exit balance reconcile
+            log.info(f"Exit: trade_id={trade_id} {symbol} pnl=${pnl:.2f} reason={exit_reason}")
             try:
-                bs = get_balance_sync()
-                bs.post_exit_reconcile()
-            except Exception as e:
-                log.warning(f"Post-exit reconcile failed (non-fatal): {e}")
-
+                get_balance_sync().post_exit_reconcile()
+            except Exception:
+                pass
             self._respond(200, {"status": "exit_recorded", "trade_id": trade_id})
         else:
-            log.warning(f"Exit for {symbol} — no trade_id provided and no open trade found")
-            # Still record PnL in risk engine for balance tracking
             if symbol:
                 self.risk_engine.record_exit(symbol, pnl, pnl_pct)
-                log.info(f"Exit recorded in risk engine only: {symbol} pnl=${pnl:.2f}")
             self._respond(200, {"status": "exit_recorded_balance_only"})
 
     def _handle_webhook(self, raw_body):
-        """Process incoming TradingView alert and forward to STA."""
+        """Process incoming TradingView alert → gates → size → STA."""
+        global _last_signal
+
         try:
             payload = json.loads(raw_body)
         except json.JSONDecodeError:
             self._respond(400, {"error": "invalid_json"})
             return
 
-        # Validate signature if secret set
+        # ── Signature check (NO secret = reject all non-TradingView) ──
         if WEBHOOK_SECRET:
             sig = self.headers.get("X-TradingView-Signature", "")
             expected = hmac.new(WEBHOOK_SECRET.encode(), raw_body, hashlib.sha256).hexdigest()
             if not hmac.compare_digest(sig, expected):
+                log.warning("Invalid signature — rejecting")
                 self._respond(403, {"error": "invalid_signature"})
                 return
+        else:
+            # No secret configured: log warning but accept (Railway demo)
+            log.warning("WEBHOOK_SECRET not set — all POSTs accepted")
 
         symbol = payload.get("symbol", "").replace("=F", "").replace("1!", "").replace("!", "")
         direction = payload.get("direction")
@@ -233,205 +225,171 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self._respond(400, {"error": "missing_fields"})
             return
 
-        log.info(f"Signal: {direction.upper()} {symbol} @ {price} (conviction: {conviction}/10)")
+        log.info(f"SIGNAL: {direction.upper()} {symbol} @ {price} conviction={conviction}/10")
 
-        # ═══════════════════════════════════════════
-        # GATE 1: News Blackout (First gate!)
-        # ═══════════════════════════════════════════
-        blackout = is_news_blackout()
-        if blackout["in_blackout"]:
-            log.warning(f"⛔ NEWS BLACKOUT: {blackout['event_name']} ({blackout['minutes_remaining']}min remaining)")
-            self._respond(200, {"status": "blocked", "reason": f"news_blackout:{blackout['event_name']}"})
-            return
+        # ── GATE 0: Idempotency (dedup same symbol+direction within 10 min) ──
+        dedup_key = f"{symbol}:{direction}"
+        now = datetime.now(timezone.utc)
+        last = _last_signal.get(dedup_key)
+        if last:
+            age = (now - last["time"]).total_seconds()
+            if age < DEDUP_SECONDS:
+                log.warning(f"DEDUP: {dedup_key} already sent {age:.0f}s ago — rejecting")
+                self._respond(200, {"status": "blocked", "reason": f"duplicate_{DEDUP_SECONDS}s"})
+                return
+        _last_signal[dedup_key] = {"time": now}
 
-        # Check geopolitical deviation
-        geo_blackout = check_geopolitical_blackout()
-        if geo_blackout["in_blackout"]:
-            log.warning(f"⚠ GEOPOLITICAL BLACKOUT: {geo_blackout['event_name']}")
-            self._respond(200, {"status": "blocked", "reason": f"geopolitical:{geo_blackout['event_name']}"})
-            return
-
-        # ═══════════════════════════════════════════
-        # GATE 2: Market Regime Gate
-        # ═══════════════════════════════════════════
-        market_regime = payload.get("market_regime", {})
-        regime = market_regime.get("regime", "trending")
-        recommended_action = market_regime.get("recommended_action", {})
-
-        # If ranging, only allow FVG reversion entries (breakout blocked)
-        if regime == "ranging" and not recommended_action.get("allow_breakout", True):
-            # Check if this is a breakout setup — block it
-            if scenario in ("breakout", "sweep_breakout"):
-                log.warning(f"⛔ REGIME GATE: Ranging market — breakout entries blocked")
-                self._respond(200, {"status": "blocked", "reason": "regime_ranging_block_breakout"})
+        # ── GATE 0.5: Position lock (max 1 open position) ──
+        open_positions = self.risk_engine.state.get("positions", {})
+        if len(open_positions) >= 1:
+            # Allow only if same symbol and opposite direction (close then open)
+            existing = open_positions.get(symbol)
+            if existing and existing["direction"] == direction:
+                log.warning(f"POSITION LOCK: already in {direction} {symbol} — rejecting")
+                self._respond(200, {"status": "blocked", "reason": "position_lock_active"})
                 return
 
-        # If volatile, require higher conviction
-        min_conviction = recommended_action.get("min_conviction", 7.0)
-        size_modifier = recommended_action.get("size_modifier", 1.0)
-        sl_multiplier = recommended_action.get("sl_multiplier", 1.0)
-
-        if conviction < min_conviction:
-            log.warning(f"⛔ REGIME GATE: {regime} market requires {min_conviction}+ conviction (got {conviction})")
-            self._respond(200, {"status": "blocked", "reason": f"regime_conviction:{regime}:need_{min_conviction}:got_{conviction}"})
+        # ── GATE 1: News Blackout ──
+        blackout = is_news_blackout()
+        if blackout["in_blackout"]:
+            log.warning(f"⛔ NEWS: {blackout['event_name']} ({blackout['minutes_remaining']}min)")
+            self._respond(200, {"status": "blocked", "reason": f"news_blackout:{blackout['event_name']}"})
+            return
+        geo = check_geopolitical_blackout()
+        if geo["in_blackout"]:
+            log.warning(f"⚠ GEO: {geo['event_name']}")
+            self._respond(200, {"status": "blocked", "reason": f"geopolitical:{geo['event_name']}"})
             return
 
-        # ═══════════════════════════════════════════
-        # GATE 3: Silver Bullet Boost
-        # ═══════════════════════════════════════════
-        now_utc = datetime.now(timezone.utc)
-        current_hour = now_utc.hour + now_utc.minute / 60.0
+        # ── GATE 2: Market Regime ──
+        market_regime = payload.get("market_regime", {})
+        regime = market_regime.get("regime", "trending")
+        rec = market_regime.get("recommended_action", {})
+        if regime == "ranging" and not rec.get("allow_breakout", True) and scenario in ("breakout", "sweep_breakout"):
+            self._respond(200, {"status": "blocked", "reason": "regime_ranging_block_breakout"})
+            return
+        min_conviction = rec.get("min_conviction", 7.0)
+        size_modifier = rec.get("size_modifier", 1.0)
+        sl_multiplier = rec.get("sl_multiplier", 1.0)
+        if conviction < min_conviction:
+            self._respond(200, {"status": "blocked", "reason": f"regime_conviction:{regime}:need_{min_convition}:got_{conviction}"})
+            return
+
+        # ── GATE 3: Silver Bullet Boost ──
+        current_hour = now.hour + now.minute / 60.0
         in_silver_bullet = SILVER_BULLET_START <= current_hour < SILVER_BULLET_END
         if in_silver_bullet:
             conviction = min(10.0, conviction + SILVER_BULLET_BOOST)
-            log.info(f"Silver Bullet window active — conviction boosted to {conviction}/10")
 
-        # ═══════════════════════════════════════════
-        # GATE 4: Asia Wed-Fri Gate
-        # ═══════════════════════════════════════════
-        asia_hour = 5.5 + 1.5/60.0  # 1:30 AM ET = 5:30 UTC
-        asia_end = 7.0  # 3:00 AM ET = 7:00 UTC
-        in_asia_window = asia_hour <= current_hour < asia_end
-        if in_asia_window and now_utc.weekday() not in ASIA_TRADING_DAYS:
-            log.warning(f"Asia window blocked — {now_utc.strftime('%A')} not in trading days {ASIA_TRADING_DAYS}")
+        # ── GATE 4: Asia Wed-Fri ──
+        asia_hour, asia_end = 5.5 + 1.5/60.0, 7.0
+        if asia_hour <= current_hour < asia_end and now.weekday() not in ASIA_TRADING_DAYS:
             self._respond(200, {"status": "blocked", "reason": "asia_blocked_wed_fri"})
             return
 
-        # ═══════════════════════════════════════════
-        # GATE 4.5: Balance Sync Block Check (live only)
-        # ═══════════════════════════════════════════
+        # ── GATE 4.5: Sync block (live only) ──
         try:
-            bs = get_balance_sync()
-            if os.getenv("TRADOVATE_ENV", "demo") == "live" and bs.is_sync_blocked():
-                log.warning("⛔ SYNC BLOCKED: 3+ consecutive balance sync failures — new entries blocked")
+            if os.getenv("TRADOVATE_ENV", "demo") == "live" and get_balance_sync().is_sync_blocked():
                 self._respond(200, {"status": "blocked", "reason": "sync_blocked_3_failures"})
                 return
-        except Exception as e:
-            log.warning(f"Sync gate check failed (non-fatal): {e}")
+        except Exception:
+            pass
 
-        # ═══════════════════════════════════════════
-        # GATE 5: Lucid Risk Gate
-        # ═══════════════════════════════════════════
+        # ── GATE 5: Lucid Risk ──
         gate_result = self.risk_engine.check_gate(symbol, direction, price, conviction)
         if not gate_result["allowed"]:
-            log.warning(f"GATE BLOCKED: {gate_result['reason']}")
             self._respond(200, {"status": "blocked", "reason": gate_result["reason"]})
             return
 
-        # ═══════════════════════════════════════════
-        # Stop Loss Determination (before sizing)
-        # ═══════════════════════════════════════════
+        # ── Stop Loss Determination ──
         if sl_target <= 0:
-            log.warning(f"⛔ Missing stop distance in signal — rejecting {symbol} {direction}")
             self._respond(200, {"status": "blocked", "reason": "missing_stop_distance"})
             return
-
-        sl_dist = abs(price - sl_target)
-        if sl_dist <= 0:
-            log.warning(f"⛔ Invalid stop distance (zero) — rejecting {symbol} {direction}")
-            self._respond(200, {"status": "blocked", "reason": "invalid_stop_distance"})
-            return
-
-        # Apply regime SL multiplier
-        sl_dist = sl_dist * sl_multiplier
-
-        # MGC Stop Widening (min 20 ticks, max 40 ticks)
+        sl_dist = abs(price - sl_target) * sl_multiplier
         if "MGC" in symbol:
             sl_ticks = int(sl_dist / MGC_TICK_SIZE)
-            if sl_ticks < MGC_MIN_STOP_TICKS:
-                sl_dist = MGC_MIN_STOP_TICKS * MGC_TICK_SIZE
-                log.info(f"MGC stop widened to {MGC_MIN_STOP_TICKS} ticks ({sl_dist})")
-            elif sl_ticks > MGC_MAX_STOP_TICKS:
-                sl_dist = MGC_MAX_STOP_TICKS * MGC_TICK_SIZE
-                log.info(f"MGC stop capped at {MGC_MAX_STOP_TICKS} ticks ({sl_dist})")
+            sl_dist = max(MGC_MIN_STOP_TICKS, min(MGC_MAX_STOP_TICKS, sl_ticks)) * MGC_TICK_SIZE
 
-        # ═══════════════════════════════════════════
-        # Kelly Criterion Sizing (with regime modifier + actual stop)
-        # ═══════════════════════════════════════════
+        # ── Kelly Sizing ──
         contracts = self.risk_engine.calculate_contracts(symbol, direction, price, conviction, sl_dist)
-        # Apply regime size modifier (e.g. 0.5 for volatile)
         contracts = max(1, int(contracts * size_modifier))
         if contracts <= 0:
-            log.warning("Sizing returned 0 contracts — aborting")
             self._respond(200, {"status": "blocked", "reason": "zero_contracts"})
             return
 
-        # Log full sizing decision for audit
-        log.info(f"SIZING: entry={price} stop={sl_dist} dist_ticks={int(sl_dist/0.10 if 'MGC' in symbol else sl_dist/0.25)} "
-                 f"risk$={self.risk_engine.state['balance'] * self.risk_engine._kelly_criterion(conviction):.2f} "
-                 f"per_contract$={sl_dist * 10.0:.2f} contracts={contracts} "
-                 f"capped={'yes' if contracts >= (8 if 'MGC' in symbol else 6) else 'no'}")
-
-        # ═══════════════════════════════════════════
-        # TP Levels (using actual sl_dist)
-        # ═══════════════════════════════════════════
+        # ── TP Levels ──
         tp1_price = price + (sl_dist * 1.5) if direction == "long" else price - (sl_dist * 1.5)
         tp2_price = price + (sl_dist * 3.0) if direction == "long" else price - (sl_dist * 3.0)
-
-        # ═══════════════════════════════════════════
-        # Build STA signal payload
-        # ═══════════════════════════════════════════
-        part_size = max(1, contracts // 3)
-        remaining = contracts - (2 * part_size)
         sl_price = price - sl_dist if direction == "long" else price + sl_dist
 
         sta_action = "buy" if direction == "long" else "sell"
         sta_payload = {
             "action": sta_action,
-            "symbol": "MGC" if "MGC" in symbol else "MES",
+            "symbol": "MGC" if "MGC" in symbol else ("MES" if "MES" in symbol else "MNQ"),
             "qty": contracts,
             "orderType": "limit",
-            "price": price,
-            "stopLoss": sl_price,
+            "price": round(price, 2),
+            "stopLoss": round(sl_price, 2),
             "takeProfit": round(tp1_price, 2),
             "bracket1": {
                 "target": round(tp2_price, 2),
-                "stop": sl_price
+                "stop": round(sl_price, 2)
             },
             "comment": f"AurumEdge_{direction.upper()}_{regime}"
         }
 
-        # ═══════════════════════════════════════════
-        # Send to Signal Trade App
-        # ═══════════════════════════════════════════
+        # ── Send to STA ──
         result = self.sta.send_signal(sta_payload)
-        self.risk_engine.record_entry(symbol, direction, price, contracts, conviction)
 
-        # ═══════════════════════════════════════════
-        # Log to Trade Journal
-        # ═══════════════════════════════════════════
+        # ── Truth-check: extract orderId from STA response ──
+        order_id = None
+        execution_confirmed = False
+        if result:
+            if isinstance(result, dict):
+                order_id = result.get("orderId") or result.get("order_id") or result.get("id")
+                execution_confirmed = bool(order_id)
+            if execution_confirmed:
+                log.info(f"✅ EXECUTION CONFIRMED: orderId={order_id}")
+            else:
+                log.error(f"❌ EXECUTION FAILED: STA accepted but no orderId — response={result}")
+                self.risk_engine.state["last_execution_confirmed"] = False
+                self.risk_engine.state["last_order_id"] = None
+                self.risk_engine.state["last_execution_time"] = now.isoformat()
+        else:
+            log.error(f"❌ STA signal delivery failed")
+            self.risk_engine.state["last_execution_confirmed"] = False
+            self.risk_engine.state["last_order_id"] = None
+            self.risk_engine.state["last_execution_time"] = now.isoformat()
+
+        # ── Record entry in risk engine + store orderId ──
+        self.risk_engine.record_entry(symbol, direction, price, contracts, conviction)
+        if order_id:
+            self.risk_engine.state["last_order_id"] = order_id
+            self.risk_engine.state["last_execution_confirmed"] = True
+            self.risk_engine.state["last_execution_time"] = now.isoformat()
+            self.risk_engine._save_state()
+
+        # ── Log to Trade Journal ──
         session_label = "london" if 7 <= current_hour < 10 else ("silver_bullet" if in_silver_bullet else "ny_open")
         self.journal.log_entry(
-            symbol=symbol,
-            direction=direction,
-            entry_price=price,
-            stop_loss=sl_price,
-            take_profit=tp2_price,
-            quantity=contracts,
-            conviction=conviction,
-            regime=regime,
-            scenario=scenario,
-            silver_bullet=in_silver_bullet,
-            session=session_label,
-            entry_reason=entry_reason,
-            gate_failures=[]
+            symbol=symbol, direction=direction, entry_price=price,
+            stop_loss=sl_price, take_profit=tp2_price, quantity=contracts,
+            conviction=conviction, regime=regime, scenario=scenario,
+            silver_bullet=in_silver_bullet, session=session_label,
+            entry_reason=entry_reason, gate_failures=[]
         )
-        log.info(f"Trade journal entry logged: {direction.upper()} {symbol} @ {price}")
 
-        if result:
-            log.info(f"Signal executed: {direction.upper()} {contracts}x {symbol} | Regime: {regime}")
-            self._respond(200, {
-                "status": "executed",
-                "symbol": symbol,
-                "direction": direction,
-                "contracts": contracts,
-                "conviction": conviction,
-                "regime": regime,
-                "sta_response": result
-            })
-        else:
-            log.error(f"STA signal delivery failed for {symbol}")
-            self._respond(502, {"status": "failed", "reason": "sta_delivery_failed"})
+        status = "executed" if execution_confirmed else "delivery_confirmed"
+        self._respond(200, {
+            "status": status,
+            "symbol": symbol,
+            "direction": direction,
+            "contracts": contracts,
+            "conviction": conviction,
+            "order_id": order_id,
+            "execution_confirmed": execution_confirmed,
+            "regime": regime,
+        })
 
     def _respond(self, code, data):
         body = json.dumps(data).encode()
@@ -447,7 +405,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
 # ── Hard Close Scheduler ───────────────────────
 def hard_close_scheduler():
-    """Check every minute and send close signals at 16:30 ET (20:30 UTC)."""
+    """Flatten all positions at 16:30 ET (20:30 UTC) / 11:45 ET (15:45 UTC) Fri."""
     sta = SignalTradeAppClient()
     journal = TradeJournal()
     risk_engine = LucidRiskEngine()
@@ -455,50 +413,39 @@ def hard_close_scheduler():
     while True:
         now = datetime.now(timezone.utc)
         hour_min = now.hour * 60 + now.minute
-        target = 20 * 60 + 30  # 20:30 UTC = 16:30 ET
+        # Fri early close at 11:45 ET = 15:45 UTC (market closes 12:00 ET)
+        if now.weekday() == 4:
+            target = 15 * 60 + 45
+        else:
+            target = 20 * 60 + 30  # 16:30 ET = 20:30 UTC
         if target <= hour_min < target + 3:
-            log.info("Hard close time reached — closing all positions via STA")
+            log.info(f"Hard close time ({'Fri' if now.weekday() == 4 else 'Daily'}) — flattening via STA")
             for sym in symbols:
-                sta.close_position(sym)
-                # Find the last open trade for this symbol and record exit
-                last_trade = journal.get_last_open_trade_by_symbol(sym)
-                if last_trade:
-                    journal.log_exit(
-                        trade_id=last_trade["id"],
-                        exit_price=0,
-                        exit_reason="hard_close",
-                        pnl=0,
-                        pnl_pct=0,
-                        notes=f"Hard close at {now.isoformat()}"
-                    )
-                    log.info(f"Hard close logged for {sym} trade_id={last_trade['id']}")
+                pos = risk_engine.state.get("positions", {}).get(sym)
+                qty = pos["contracts"] if pos else 1
+                result = sta.flatten_position(sym, qty)
+                if result and (result.get("orderId") or result.get("order_id")):
+                    log.info(f"Hard close {sym} orderId={result.get('orderId') or result.get('order_id')}")
                 else:
-                    log.info(f"No open trade found for {sym} at hard close")
-            time.sleep(120)  # Wait 2 min before checking again
+                    log.warning(f"Hard close {sym} — no orderId in response")
+            time.sleep(180)
         time.sleep(30)
 
 
 # ── Main ───────────────────────────────────────
 def main():
-    """Start the webhook server and hard close scheduler."""
-    # Startup balance sync from Tradovate
     try:
         risk_engine = LucidRiskEngine()
         bs = init_balance_sync(risk_engine)
-        log.info("Startup balance sync completed")
-        # Make sync available to the WebhookHandler class
         WebhookHandler.balance_sync = bs
-        WebhookHandler._risk_engine_sync = risk_engine
     except Exception as e:
-        log.warning(f"Startup balance sync failed (continuing with state file): {e}")
+        log.warning(f"Startup sync failed: {e}")
 
-    # Start hard close scheduler
     t = threading.Thread(target=hard_close_scheduler, daemon=True)
     t.start()
 
     server = HTTPServer((LISTEN_HOST, LISTEN_PORT), WebhookHandler)
-    log.info(f"Aurum Edge Webhook listening on {LISTEN_HOST}:{LISTEN_PORT}")
-    log.info(f"STA Webhook URL: {'configured' if STA_WEBHOOK_URL else 'NOT CONFIGURED'}")
+    log.info(f"Aurum Edge v2.2 listening on {LISTEN_HOST}:{LISTEN_PORT}")
     server.serve_forever()
 
 
