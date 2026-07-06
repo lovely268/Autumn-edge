@@ -298,11 +298,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
             return
 
         # ═══════════════════════════════════════════
-        # GATE 4.5: Balance Sync Block Check
+        # GATE 4.5: Balance Sync Block Check (live only)
         # ═══════════════════════════════════════════
         try:
             bs = get_balance_sync()
-            if bs.is_sync_blocked():
+            if os.getenv("TRADOVATE_ENV", "demo") == "live" and bs.is_sync_blocked():
                 log.warning("⛔ SYNC BLOCKED: 3+ consecutive balance sync failures — new entries blocked")
                 self._respond(200, {"status": "blocked", "reason": "sync_blocked_3_failures"})
                 return
