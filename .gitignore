@@ -27,4 +27,5 @@ final_health.txt
 
 # OS
 .DS_Store
-Thumbs.db*.db
+*.db
+*.bak

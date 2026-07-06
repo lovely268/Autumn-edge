@@ -345,7 +345,7 @@ class LucidRiskEngine:
         return {
             "status": "PASSED" if profit_ok and consistency_ok and floor_ok and days_ok else "ACTIVE",
             "service": "Aurum Edge Webhook",
-            "version": "2.1",
+            "version": "2.2",
             "balance": round(self.state["balance"], 2),
             "daily_pnl": round(self.state["daily_pnl"], 2),
             "total_pnl": round(self.state["total_pnl"], 2),
