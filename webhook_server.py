@@ -180,6 +180,19 @@ class WebhookHandler(BaseHTTPRequestHandler):
         elif path == "/resume":
             set_resumed()
             self._respond(200, {"bot_state": "resumed"})
+        elif path == "/set_balance":
+            from urllib.parse import parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            bal = float(qs.get("value", [0])[0])
+            if bal > 0:
+                old = self.risk_engine.state["balance"]
+                self.risk_engine.state["balance"] = bal
+                self.risk_engine.state["peak_balance"] = max(self.risk_engine.state["peak_balance"], bal)
+                self.risk_engine.state["daily_high_watermark"] = max(self.risk_engine.state["daily_high_watermark"], bal)
+                self.risk_engine._save_state()
+                self._respond(200, {"old_balance": old, "new_balance": bal, "set": True})
+            else:
+                self._respond(400, {"error": "invalid_balance", "got": bal})
         else:
             self._respond(404, {"error": "not_found"})
 
