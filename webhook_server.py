@@ -28,6 +28,7 @@ from config import (
 from lucid_risk_engine import LucidRiskEngine, get_current_session
 from news_calendar_2026 import is_news_blackout, check_geopolitical_blackout, get_next_event
 from trade_journal import TradeJournal
+from tradovate_balance_sync import get_balance_sync, init_balance_sync
 
 # ── Config ─────────────────────────────────────
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
@@ -127,6 +128,18 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 "active_blockers": active_gates,
                 "active_boosters": semi_active,
             }
+
+            # Add balance sync info
+            try:
+                bs = get_balance_sync()
+                status["balance_sync"] = bs.get_sync_info()
+                # Periodic reconcile (non-blocking)
+                if bs.risk_engine:
+                    sync_result = bs.periodic_reconcile()
+                    status["balance_sync"]["last_reconcile"] = sync_result
+            except Exception as e:
+                status["balance_sync"] = {"error": str(e), "synced": False}
+
             self._respond(200, status)
         elif path == "/":
             self._respond(200, {"service": "Aurum Edge Webhook", "version": "2.0"})
@@ -175,6 +188,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self.journal.log_exit(trade_id, exit_price, exit_reason, pnl, pnl_pct, fees)
             self.risk_engine.record_exit(symbol, pnl, pnl_pct)
             log.info(f"Exit recorded: trade_id={trade_id} {symbol} pnl=${pnl:.2f} reason={exit_reason}")
+
+            # Post-exit balance reconcile
+            try:
+                bs = get_balance_sync()
+                bs.post_exit_reconcile()
+            except Exception as e:
+                log.warning(f"Post-exit reconcile failed (non-fatal): {e}")
+
             self._respond(200, {"status": "exit_recorded", "trade_id": trade_id})
         else:
             log.warning(f"Exit for {symbol} — no trade_id provided and no open trade found")
@@ -275,6 +296,18 @@ class WebhookHandler(BaseHTTPRequestHandler):
             log.warning(f"Asia window blocked — {now_utc.strftime('%A')} not in trading days {ASIA_TRADING_DAYS}")
             self._respond(200, {"status": "blocked", "reason": "asia_blocked_wed_fri"})
             return
+
+        # ═══════════════════════════════════════════
+        # GATE 4.5: Balance Sync Block Check
+        # ═══════════════════════════════════════════
+        try:
+            bs = get_balance_sync()
+            if bs.is_sync_blocked():
+                log.warning("⛔ SYNC BLOCKED: 3+ consecutive balance sync failures — new entries blocked")
+                self._respond(200, {"status": "blocked", "reason": "sync_blocked_3_failures"})
+                return
+        except Exception as e:
+            log.warning(f"Sync gate check failed (non-fatal): {e}")
 
         # ═══════════════════════════════════════════
         # GATE 5: Lucid Risk Gate
@@ -448,6 +481,17 @@ def hard_close_scheduler():
 # ── Main ───────────────────────────────────────
 def main():
     """Start the webhook server and hard close scheduler."""
+    # Startup balance sync from Tradovate
+    try:
+        risk_engine = LucidRiskEngine()
+        bs = init_balance_sync(risk_engine)
+        log.info("Startup balance sync completed")
+        # Make sync available to the WebhookHandler class
+        WebhookHandler.balance_sync = bs
+        WebhookHandler._risk_engine_sync = risk_engine
+    except Exception as e:
+        log.warning(f"Startup balance sync failed (continuing with state file): {e}")
+
     # Start hard close scheduler
     t = threading.Thread(target=hard_close_scheduler, daemon=True)
     t.start()
