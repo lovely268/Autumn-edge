@@ -193,6 +193,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 self._respond(200, {"old_balance": old, "new_balance": bal, "set": True})
             else:
                 self._respond(400, {"error": "invalid_balance", "got": bal})
+        elif path == "/debug_env":
+            url = os.getenv("STA_WEBHOOK_URL", "")
+            self._respond(200, {
+                "STA_WEBHOOK_URL_set": bool(url),
+                "STA_WEBHOOK_URL_length": len(url),
+                "STA_WEBHOOK_URL_preview": url[:30] + "..." if len(url) > 30 else url,
+                "STA_WEBHOOK_URL_ends_with": url[-12:] if len(url) >= 12 else url,
+            })
         else:
             self._respond(404, {"error": "not_found"})
 
