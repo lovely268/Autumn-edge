@@ -219,9 +219,32 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 "STA_WEBHOOK_URL_ends_with": url[-12:] if len(url) >= 12 else url,
             })
         elif path == "/reset_state":
-            """Reset risk engine state to clean defaults with 50K balance."""
-            from lucid_risk_engine import STATE_PATH as _sp
+            """Reset risk engine state to clean defaults with 50K balance.
+            
+            Guarded: requires ?token= matching RESET_TOKEN env var.
+            Hard-disabled when TRADOVATE_ENV=live (eval mode).
+            """
+            from urllib.parse import parse_qs as _parse_qs
+            from lucid_risk_engine import STATE_PATH as _sp, ACCOUNT_SIZE as _acct_size
             import json as _json, os as _os
+
+            # Hard-disable in live eval mode
+            if os.getenv("TRADOVATE_ENV", "").strip().lower() == "live":
+                self._respond(403, {"error": "reset_disabled", "reason": "TRADOVATE_ENV=live"})
+                return
+
+            # Token guard
+            qs = _parse_qs(urlparse(self.path).query)
+            token = qs.get("token", [None])[0]
+            expected = os.getenv("RESET_TOKEN", "")
+            if not expected:
+                log.warning("RESET_TOKEN not set — /reset_state disabled")
+                self._respond(403, {"error": "reset_disabled", "reason": "RESET_TOKEN not configured"})
+                return
+            if token != expected:
+                self._respond(403, {"error": "reset_disabled", "reason": "invalid_token"})
+                return
+
             clean_state = {
                 "version": 2,
                 "balance": 50000.0,
@@ -237,7 +260,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 "daily_high_watermark": 50000.0,
                 "peak_balance": 50000.0,
                 "pass_alert_sent": False,
-                "last_action": "state_reset",
+                "last_action": "state_reset:endpoint",
                 "last_action_time": datetime.now(timezone.utc).isoformat(),
             }
             temp = _sp + ".tmp"
@@ -587,7 +610,8 @@ def main():
         with open(temp, "w") as f:
             json.dump(clean_state, f, indent=2)
         os.replace(temp, _sp)
-        log.info("State file reset — balance=50000, positions=empty, daily_pnl=0")
+        log.info("STATE RESET EXECUTED — balance=50000, positions=empty, daily_pnl=0")
+        log.warning("Broker shows $55,462.60 test residue (excluded); trading baseline set to $50,000.00")
 
     # Start PAUSED — eval discovery pending
     set_paused("eval_discovery_pending")
