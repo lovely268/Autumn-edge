@@ -392,11 +392,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
             "price": round(price, 2),
             "stopLoss": round(sl_price, 2),
             "takeProfit": round(tp1_price, 2),
-            "bracket1": {
-                "target": round(tp2_price, 2),
-                "stop": round(sl_price, 2)
-            },
-            "comment": f"AurumEdge_{direction.upper()}_{regime}"
         }
 
         # ── Send to STA ──
