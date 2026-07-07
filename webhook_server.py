@@ -198,7 +198,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self._respond(200, {
                 "STA_WEBHOOK_URL_set": bool(url),
                 "STA_WEBHOOK_URL_length": len(url),
-                "STA_WEBHOOK_URL_preview": url[:30] + "..." if len(url) > 30 else url,
+                "STA_WEBHOOK_URL_full": url,
+                "STA_WEBHOOK_URL_preview": url[:60] + "..." if len(url) > 60 else url,
                 "STA_WEBHOOK_URL_ends_with": url[-12:] if len(url) >= 12 else url,
             })
         else:
