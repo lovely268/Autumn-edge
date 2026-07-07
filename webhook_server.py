@@ -31,6 +31,14 @@ STA_WEBHOOK_URL = os.getenv("STA_WEBHOOK_URL", "")
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = int(os.getenv("PORT", "3000"))
 
+# ── Contract Mapping (Tradovate requires front-month contracts, not continuous symbols) ──
+# Override any entry via env var CONTRACT_MAP_MGC, CONTRACT_MAP_MES, CONTRACT_MAP_MNQ
+CONTRACT_MAP = {
+    "MGC": os.getenv("CONTRACT_MAP_MGC", "MGCQ6"),
+    "MES": os.getenv("CONTRACT_MAP_MES", "MESU6"),
+    "MNQ": os.getenv("CONTRACT_MAP_MNQ", "MNQU6"),
+}
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("webhook")
 
@@ -385,9 +393,17 @@ class WebhookHandler(BaseHTTPRequestHandler):
         sl_price = price - sl_dist if direction == "long" else price + sl_dist
 
         sta_action = "buy" if direction == "long" else "sell"
+        # Resolve continuous symbol → front-month contract via CONTRACT_MAP
+        for base, contract in CONTRACT_MAP.items():
+            if base in symbol:
+                sta_symbol = contract
+                break
+        else:
+            sta_symbol = symbol  # fallback: send as-is
+            log.warning(f"No contract map entry for {symbol} — sending raw")
         sta_payload = {
             "action": sta_action,
-            "symbol": "MGC" if "MGC" in symbol else ("MES" if "MES" in symbol else "MNQ"),
+            "symbol": sta_symbol,
             "qty": contracts,
             "orderType": "limit",
             "price": round(price, 2),
@@ -466,7 +482,7 @@ def hard_close_scheduler():
     sta = SignalTradeAppClient()
     journal = TradeJournal()
     risk_engine = LucidRiskEngine()
-    symbols = ["MGC", "MES"]
+    symbols = list(CONTRACT_MAP.values())  # e.g. ["MGCQ6", "MESU6", "MNQU6"]
     while True:
         now = datetime.now(timezone.utc)
         hour_min = now.hour * 60 + now.minute
@@ -509,6 +525,7 @@ def main():
 
     server = HTTPServer((LISTEN_HOST, LISTEN_PORT), WebhookHandler)
     log.info(f"Aurum Edge v2.2 listening on {LISTEN_HOST}:{LISTEN_PORT}")
+    log.info(f"Contract map active: {CONTRACT_MAP}")
     server.serve_forever()
 
 
