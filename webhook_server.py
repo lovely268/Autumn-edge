@@ -244,8 +244,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
             with open(temp, "w") as f:
                 _json.dump(clean_state, f, indent=2)
             _os.replace(temp, _sp)
-            # Re-initialize risk engine with clean state
-            self.risk_engine = LucidRiskEngine()
+            # Re-initialize risk engine with clean state (class var, must use WebhookHandler not self)
+            WebhookHandler.risk_engine = LucidRiskEngine()
             paused = _bot_paused
             self._respond(200, {
                 "status": "state_reset",
