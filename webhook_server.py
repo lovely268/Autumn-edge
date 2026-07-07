@@ -12,7 +12,7 @@ import hashlib
 import logging
 import threading
 import requests as http_req
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
@@ -217,6 +217,44 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 "STA_WEBHOOK_URL_full": url,
                 "STA_WEBHOOK_URL_preview": url[:60] + "..." if len(url) > 60 else url,
                 "STA_WEBHOOK_URL_ends_with": url[-12:] if len(url) >= 12 else url,
+            })
+        elif path == "/reset_state":
+            """Reset risk engine state to clean defaults with 50K balance."""
+            from lucid_risk_engine import STATE_PATH as _sp
+            import json as _json, os as _os
+            clean_state = {
+                "version": 2,
+                "balance": 50000.0,
+                "daily_pnl": 0.0,
+                "total_pnl": 0.0,
+                "last_date": str(date.today()),
+                "consistency_days": {},
+                "consecutive_losses": 0,
+                "pause_until": None,
+                "positions": {},
+                "trades_today": 0,
+                "trading_days": [],
+                "daily_high_watermark": 50000.0,
+                "peak_balance": 50000.0,
+                "pass_alert_sent": False,
+                "last_action": "state_reset",
+                "last_action_time": datetime.now(timezone.utc).isoformat(),
+            }
+            temp = _sp + ".tmp"
+            with open(temp, "w") as f:
+                _json.dump(clean_state, f, indent=2)
+            _os.replace(temp, _sp)
+            # Re-initialize risk engine with clean state
+            self.risk_engine = LucidRiskEngine()
+            paused = _bot_paused
+            self._respond(200, {
+                "status": "state_reset",
+                "balance": 50000.0,
+                "daily_pnl": 0.0,
+                "positions": {},
+                "daily_cap_remaining": 600.0,
+                "trades_today": 0,
+                "paused": paused,
             })
         else:
             self._respond(404, {"error": "not_found"})
@@ -523,6 +561,34 @@ def hard_close_scheduler():
 
 # ── Main ───────────────────────────────────────
 def main():
+    # ── Option A: RESET_STATE env var at startup ──
+    if os.getenv("RESET_STATE", "").strip().lower() == "true":
+        log.warning("🚀 RESET_STATE=true detected — force-writing clean state file")
+        from lucid_risk_engine import STATE_PATH as _sp
+        clean_state = {
+            "version": 2,
+            "balance": 50000.0,
+            "daily_pnl": 0.0,
+            "total_pnl": 0.0,
+            "last_date": str(date.today()),
+            "consistency_days": {},
+            "consecutive_losses": 0,
+            "pause_until": None,
+            "positions": {},
+            "trades_today": 0,
+            "trading_days": [],
+            "daily_high_watermark": 50000.0,
+            "peak_balance": 50000.0,
+            "pass_alert_sent": False,
+            "last_action": "state_reset:env_var",
+            "last_action_time": datetime.now(timezone.utc).isoformat(),
+        }
+        temp = _sp + ".tmp"
+        with open(temp, "w") as f:
+            json.dump(clean_state, f, indent=2)
+        os.replace(temp, _sp)
+        log.info("State file reset — balance=50000, positions=empty, daily_pnl=0")
+
     # Start PAUSED — eval discovery pending
     set_paused("eval_discovery_pending")
     try:
