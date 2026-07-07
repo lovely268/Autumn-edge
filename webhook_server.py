@@ -110,14 +110,22 @@ class SignalTradeAppClient:
         }
         return self.send_signal(payload)
 
-    def flatten_position(self, symbol, qty):
-        """Flatten via opposite-side market order (for hard close)."""
+    def flatten_position(self, symbol, qty, direction="long"):
+        """Flatten via opposite-side market order (for hard close).
+        
+        direction: the current position direction — we send the opposite to close.
+        If flat (qty=0), logs and returns early with {"flat": true}.
+        """
+        if qty <= 0:
+            log.info(f"Hard close {symbol}: qty={qty} — already flat, skipping")
+            return {"flat": True}
+        action = "sell" if direction == "long" else "buy"
         payload = {
-            "action": "sell",
+            "action": action,
             "symbol": symbol,
             "qty": qty,
             "orderType": "market",
-            "comment": f"HardClose_{datetime.now(timezone.utc).strftime('%H%M')}"
+            "comment": f"HardClose_{direction.upper()}_{datetime.now(timezone.utc).strftime('%H%M')}"
         }
         return self.send_signal(payload)
 
@@ -495,8 +503,12 @@ def hard_close_scheduler():
             log.info(f"Hard close time ({'Fri' if now.weekday() == 4 else 'Daily'}) — flattening via STA")
             for sym in symbols:
                 pos = risk_engine.state.get("positions", {}).get(sym)
-                qty = pos["contracts"] if pos else 1
-                result = sta.flatten_position(sym, qty)
+                if not pos or pos.get("contracts", 0) <= 0:
+                    log.info(f"Hard close {sym}: already flat — skipping")
+                    continue
+                qty = pos["contracts"]
+                direction = pos.get("direction", "long")
+                result = sta.flatten_position(sym, qty, direction)
                 if result and (result.get("orderId") or result.get("order_id")):
                     oid = result.get("orderId") or result.get("order_id")
                     if oid != "undefined":
