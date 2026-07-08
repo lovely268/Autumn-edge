@@ -8,6 +8,7 @@ import os
 import json
 import logging
 from datetime import datetime, timezone, date, timedelta
+from zoneinfo import ZoneInfo
 
 STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lucid_state.json")
 STATE_BACKUP_PATH = STATE_PATH + ".bak"
@@ -341,6 +342,7 @@ class LucidRiskEngine:
         days_ok = len(self.state.get("trading_days", [])) >= 2
 
         now = datetime.now(timezone.utc)
+        now_et = datetime.now(ZoneInfo("America/New_York"))
         current_session = get_current_session(now)
         hour_et = (now.hour - 4 + now.minute / 60.0) % 24
 
@@ -366,7 +368,9 @@ class LucidRiskEngine:
                 "label": current_session,
                 "time_utc": now.strftime("%H:%M:%S"),
                 "time_et": f"{int(hour_et):02d}:{int((hour_et % 1) * 60):02d}",
-                "weekday": now.strftime("%A"),
+                "utc_weekday": now.strftime("%A"),
+                "weekday_et": now_et.strftime("%A"),
+                "trade_date": (now_et.date() + timedelta(days=1)).isoformat() if now_et.hour >= 18 else now_et.date().isoformat(),
             },
             "pass_conditions": {
                 "profit_target_1250": profit_ok,
