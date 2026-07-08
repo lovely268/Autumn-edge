@@ -613,8 +613,14 @@ def main():
         log.info("STATE RESET EXECUTED — balance=50000, positions=empty, daily_pnl=0")
         log.warning("Broker shows $55,462.60 test residue (excluded); trading baseline set to $50,000.00")
 
-    # Start PAUSED — eval discovery pending
-    set_paused("eval_discovery_pending")
+    # ── Startup pause: opt-in via PAUSE_ON_START env var (default: boot LIVE) ──
+    pause_on_start = os.getenv("PAUSE_ON_START", "").lower() in ("true", "1", "yes")
+    if pause_on_start:
+        set_paused("env_var_pause_on_start")
+        log.warning("🚫 BOOT STATE: PAUSED — PAUSE_ON_START=true. Call GET /resume to unpause.")
+    else:
+        set_resumed()
+        log.info("🟢 BOOT STATE: LIVE — bot started and accepting signals.")
     try:
         risk_engine = LucidRiskEngine()
         bs = init_balance_sync(risk_engine)
