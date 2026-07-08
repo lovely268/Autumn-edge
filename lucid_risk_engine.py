@@ -70,12 +70,14 @@ class LucidRiskEngine:
     def __init__(self):
         self.state = self._load_state()
         self._reset_if_new_day()
+        log.info(f"BALANCE LOADED: ${self.state['balance']:.2f} from state file")
 
     # ── Persistence ──
     def _defaults(self):
+        starting_balance = float(os.getenv("STARTING_BALANCE", str(ACCOUNT_SIZE)))
         return {
             "version": STATE_VERSION,
-            "balance": ACCOUNT_SIZE,
+            "balance": starting_balance,
             "daily_pnl": 0.0,
             "total_pnl": 0.0,
             "last_date": str(date.today()),
@@ -85,8 +87,8 @@ class LucidRiskEngine:
             "positions": {},
             "trades_today": 0,
             "trading_days": [],
-            "daily_high_watermark": ACCOUNT_SIZE,
-            "peak_balance": ACCOUNT_SIZE,
+            "daily_high_watermark": starting_balance,
+            "peak_balance": starting_balance,
             "pass_alert_sent": False,
             "last_action": None,
             "last_action_time": None,
