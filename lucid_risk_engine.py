@@ -368,8 +368,8 @@ class LucidRiskEngine:
                 "label": current_session,
                 "time_utc": now.strftime("%H:%M:%S"),
                 "time_et": f"{int(hour_et):02d}:{int((hour_et % 1) * 60):02d}",
-                "utc_weekday": now.strftime("%A"),
-                "weekday_et": now_et.strftime("%A"),
+                "weekday": now_et.strftime("%A"),
+                "weekday_utc": now.strftime("%A"),
                 "trade_date": (now_et.date() + timedelta(days=1)).isoformat() if now_et.hour >= 18 else now_et.date().isoformat(),
             },
             "pass_conditions": {
