@@ -120,6 +120,14 @@ Required regardless of activity:
 ### 6.3 Escalate uncertainty
 Never improvise around a blocked path. If stuck, report with evidence — don't create workarounds.
 
+### 6.4 Owner pre-approval required for state-changing operations
+Any task that fires orders, modifies bot state (pause/resume/reset/balance), deploys code, or alters strategy/sizing/gates must have its written plan approved by the owner BEFORE execution. The plan states:
+- What will run (exact commands, payloads, endpoints)
+- Expected outcome (what "pass" looks like for each step)
+- Rollback procedure (how to undo if it fails)
+
+No execution on these categories without explicit owner approval of the specific plan. A plan described in chat after the fact is not approval — approval is given before the first action is taken.
+
 ---
 
 ## §7 — CODE & DEPLOYMENT
