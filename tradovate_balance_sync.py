@@ -247,8 +247,7 @@ class BalanceSync:
             # Block new entries after 3 consecutive failures
             if self.state["consecutive_sync_failures"] >= MAX_CONSECUTIVE_FAILURES:
                 self.state["sync_blocked"] = True
-                log.error(f"BALANCE SYNC: {MAX_CONSECUTIVE_FAILURES} consecutive failures — "
-                          f"blocking NEW entries until sync recovers")
+                # Note: ERROR-level log is in _record_failure() — single source
                 result["sync_blocked"] = True
                 self._save_state()
 
@@ -316,14 +315,33 @@ class BalanceSync:
         self._save_state()
 
     def _record_failure(self):
-        self.state["consecutive_sync_failures"] += 1
+        self.state["consecutive_sync_failures"] = min(
+            self.state["consecutive_sync_failures"] + 1,
+            MAX_CONSECUTIVE_FAILURES
+        )
         self.state["total_syncs"] += 1
         self.state["failed_syncs"] += 1
         if self.state["consecutive_sync_failures"] >= MAX_CONSECUTIVE_FAILURES:
             self.state["sync_blocked"] = True
-            log.error(f"BALANCE SYNC: {self.state['consecutive_sync_failures']} consecutive failures — "
-                      f"blocking NEW entries until sync recovers")
+            env = os.getenv("TRADOVATE_ENV", "demo").lower()
+            if env == "live":
+                log.error(f"BALANCE SYNC (LIVE): {self.state['consecutive_sync_failures']} consecutive failures — "
+                          f"blocking NEW entries until sync recovers")
+            else:
+                log.warning(f"BALANCE SYNC (DEMO): {self.state['consecutive_sync_failures']} consecutive failures — "
+                            f"sync_blocked flag set (no effect in demo mode)")
         self._save_state()
+
+    def _should_reconcile(self):
+        """Return True if enough time has passed since last sync attempt."""
+        last = self.state.get("last_sync_time_utc")
+        if not last:
+            return True
+        try:
+            elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds()
+            return elapsed >= SYNC_COOLDOWN_SECONDS
+        except Exception:
+            return True
 
 
 # ── Module-level singleton ──

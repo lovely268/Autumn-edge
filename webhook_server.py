@@ -181,8 +181,17 @@ class WebhookHandler(BaseHTTPRequestHandler):
             try:
                 bs = get_balance_sync()
                 status["balance_sync"] = bs.get_sync_info()
-                if bs.risk_engine:
+                # Only reconcile if cooldown elapsed (1800s) or never synced
+                if bs.risk_engine and bs._should_reconcile():
                     status["balance_sync"]["last_reconcile"] = bs.periodic_reconcile()
+                else:
+                    status["balance_sync"]["last_reconcile"] = {
+                        "synced": False,
+                        "reason": "cooldown",
+                        "consecutive_failures": bs.state["consecutive_sync_failures"],
+                        "using": "state_file",
+                        "state_balance": round(bs.risk_engine.state["balance"], 2),
+                    }
             except Exception as e:
                 status["balance_sync"] = {"error": str(e), "synced": False}
             self._respond(200, status)
