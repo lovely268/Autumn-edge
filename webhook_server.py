@@ -202,6 +202,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             status["bot_state"] = {
                 "paused": _bot_paused,
                 "pause_reason": _pause_reason,
+                "engine_id": id(self.risk_engine),
             }
             try:
                 bs = get_balance_sync()
@@ -661,9 +662,13 @@ def hard_close_scheduler():
     """Flatten all positions at 16:30 ET (20:30 UTC) / 11:45 ET (15:45 UTC) Fri."""
     sta = SignalTradeAppClient()
     journal = TradeJournal()
-    risk_engine = LucidRiskEngine()
     symbols = list(CONTRACT_MAP.values())  # e.g. ["MGCQ6", "MESU6", "MNQU6"]
     while True:
+        # ── SCHEDULER VIEW: log current positions and risk_engine object id ──
+        pos_summary = {sym: f"{p['direction']} {p['contracts']}x"
+                       for sym, p in WebhookHandler.risk_engine.state.get("positions", {}).items()}
+        log.info(f"SCHEDULER VIEW: positions={pos_summary} "
+                 f"engine_id={id(WebhookHandler.risk_engine)}")
         now = datetime.now(timezone.utc)
         hour_min = now.hour * 60 + now.minute
         # Fri early close at 11:45 ET = 15:45 UTC (market closes 12:00 ET)
@@ -676,7 +681,7 @@ def hard_close_scheduler():
             log.info(f"Hard close time ({'Fri' if now.weekday() == 4 else 'Daily'}) — flattening via STA")
             all_flat = True
             for sym in symbols:
-                pos = risk_engine.state.get("positions", {}).get(sym)
+                pos = WebhookHandler.risk_engine.state.get("positions", {}).get(sym)
                 if not pos or pos.get("contracts", 0) <= 0:
                     log.info(f"Hard close {sym}: already flat — skipping")
                     continue
