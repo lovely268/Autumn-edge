@@ -133,6 +133,27 @@ class SignalTradeAppClient:
         }
         return self.send_signal(payload)
 
+    def flatten_and_alert(self, symbol, qty, direction="long"):
+        """
+        Flatten position AND alert owner that bracket survives.
+        Honest close-plus-manual-cancel-alert design — no cancel API call.
+        Sends market close, logs triple WARNING about bracket survival.
+        """
+        if qty <= 0:
+            log.info(f"FLATTEN+ALERT {symbol}: qty={qty} — already flat, skipping")
+            return {"flat": True}
+        action = "sell" if direction == "long" else "buy"
+        log.warning(f"FLATTEN+ALERT {symbol} {qty}x {direction} — bracket OCO legs survive!")
+        log.warning(f"FLATTEN+ALERT {symbol} — MANUAL CANCEL REQUIRED via broker UI")
+        log.warning(f"FLATTEN+ALERT {symbol} — bracket_survives=true, close executed")
+        payload = {
+            "action": action,
+            "symbol": symbol,
+            "qty": qty,
+            "orderType": "market",
+            "comment": f"FlattenAlert_{direction.upper()}_{datetime.now(timezone.utc).strftime('%H%M')}"
+        }
+        return self.send_signal(payload)
 
 # ── Webhook Handler ────────────────────────────
 class WebhookHandler(BaseHTTPRequestHandler):
@@ -303,6 +324,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self._handle_webhook(body)
         elif path == "/exit":
             self._handle_exit(body)
+        elif path == "/flatten":
+            self._handle_flatten(body)
         else:
             self._respond(404, {"error": "not_found"})
 
@@ -336,6 +359,75 @@ class WebhookHandler(BaseHTTPRequestHandler):
             if symbol:
                 self.risk_engine.record_exit(symbol, pnl, pnl_pct)
             self._respond(200, {"status": "exit_recorded_balance_only"})
+
+    def _handle_flatten(self, raw_body):
+        """POST /flatten — atomically close position + alert owner about bracket survival."""
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError:
+            self._respond(400, {"error": "invalid_json"})
+            return
+        symbol = payload.get("symbol", "").upper()
+        qty = payload.get("qty", 0)
+        direction = payload.get("direction", "long")
+        # ── Hard-disable in live eval mode ──
+        if os.getenv("TRADOVATE_ENV", "").strip().lower() == "live":
+            self._respond(403, {"error": "flatten_disabled", "reason": "TRADOVATE_ENV=live"})
+            return
+        # ── Token guard ──
+        token = payload.get("token", "")
+        expected = os.getenv("RESET_TOKEN", "")
+        if not expected:
+            log.warning("RESET_TOKEN not set — /flatten disabled")
+            self._respond(403, {"error": "flatten_disabled", "reason": "RESET_TOKEN not configured"})
+            return
+        if token != expected:
+            self._respond(403, {"error": "flatten_disabled", "reason": "invalid_token"})
+            return
+        # ── Symbol validation ──
+        if not symbol:
+            self._respond(400, {"error": "missing_symbol"})
+            return
+        valid_symbols = list(CONTRACT_MAP.values())
+        if symbol not in valid_symbols:
+            self._respond(400, {"error": "invalid_symbol", "valid": valid_symbols})
+            return
+        # ── Resolve qty/direction from state if not specified ──
+        if qty <= 0:
+            pos = self.risk_engine.state.get("positions", {}).get(symbol)
+            if not pos or pos.get("contracts", 0) <= 0:
+                self._respond(200, {"status": "already_flat", "symbol": symbol})
+                return
+            qty = pos["contracts"]
+            direction = pos.get("direction", "long")
+        # ── Execute flatten + alert ──
+        result = self.sta.flatten_and_alert(symbol, qty, direction)
+        if result and (result.get("orderId") or result.get("order_id")):
+            oid = result.get("orderId") or result.get("order_id")
+            if oid != "undefined":
+                self._respond(200, {
+                    "status": "flatten_executed",
+                    "symbol": symbol,
+                    "qty": qty,
+                    "orderId": oid,
+                    "bracket_survives": True,
+                    "MANUAL_CANCEL_REQUIRED": "Bracket OCO legs survive the close. Cancel via broker UI."
+                })
+            else:
+                self._respond(200, {
+                    "status": "flatten_attempted",
+                    "symbol": symbol,
+                    "qty": qty,
+                    "orderId": "undefined",
+                    "bracket_survives": True,
+                    "MANUAL_CANCEL_REQUIRED": "orderId was undefined — verify on broker."
+                })
+        else:
+            self._respond(500, {
+                "status": "flatten_failed",
+                "symbol": symbol,
+                "error": str(result)
+            })
 
     def _handle_webhook(self, raw_body):
         """Process incoming TradingView alert → gates → size → STA."""
