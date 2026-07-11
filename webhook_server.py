@@ -38,6 +38,10 @@ CONTRACT_MAP = {
     "MES": os.getenv("CONTRACT_MAP_MES", "MESU6"),
     "MNQ": os.getenv("CONTRACT_MAP_MNQ", "MNQU6"),
 }
+# ── CME Maintenance Blackout (5:00-6:00 PM ET = 21:00-22:00 UTC) ──
+CME_MAINT_START = 21.0   # 5:00 PM ET = 21:00 UTC
+CME_MAINT_END   = 22.0   # 6:00 PM ET = 22:00 UTC
+FLATTEN_RETRY_CUTOFF = 20 + 50/60.0  # 16:50 ET = 20:50 UTC — last retry before blackout
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("webhook")
@@ -442,6 +446,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 return
         except Exception:
             pass
+        # ── GATE 4.6: CME Maintenance Blackout (5:00-6:00 PM ET = 21:00-22:00 UTC) ──
+        current_hour_utc = now.hour + now.minute / 60.0
+        if CME_MAINT_START <= current_hour_utc < CME_MAINT_END:
+            log.info(f"CME maintenance blackout ({CME_MAINT_START}-{CME_MAINT_END} UTC) — blocking signal")
+            self._respond(200, {"status": "blocked", "reason": "cme_maintenance_window"})
+            return
 
         # ── GATE 5: Lucid Risk ──
         gate_result = self.risk_engine.check_gate(symbol, direction, price, conviction)
@@ -569,13 +579,16 @@ def hard_close_scheduler():
             target = 15 * 60 + 45
         else:
             target = 20 * 60 + 30  # 16:30 ET = 20:30 UTC
-        if target <= hour_min < target + 3:
+        # ── 20-minute retry window (16:30-16:50 ET = 20:30-20:50 UTC) ──
+        if target <= hour_min < target + 20:
             log.info(f"Hard close time ({'Fri' if now.weekday() == 4 else 'Daily'}) — flattening via STA")
+            all_flat = True
             for sym in symbols:
                 pos = risk_engine.state.get("positions", {}).get(sym)
                 if not pos or pos.get("contracts", 0) <= 0:
                     log.info(f"Hard close {sym}: already flat — skipping")
                     continue
+                all_flat = False
                 qty = pos["contracts"]
                 direction = pos.get("direction", "long")
                 result = sta.flatten_position(sym, qty, direction)
@@ -587,7 +600,19 @@ def hard_close_scheduler():
                         log.warning(f"Hard close {sym} — orderId='undefined' in response")
                 else:
                     log.warning(f"Hard close {sym} — no orderId in response")
-            time.sleep(180)
+            # ── CME Maintenance gate — do NOT send orders 5-6 PM ET ──
+            if CME_MAINT_START <= hour_min / 60.0 < CME_MAINT_END:
+                log.warning(f"Hard close skipped: CME maintenance window (5-6 PM ET)")
+                if not all_flat:
+                    log.error(f"HARD CLOSE FAILED: position not flat at blackout boundary — "
+                              f"ALERT OWNER to flatten via broker UI. Do NOT send orders inside blackout.")
+                time.sleep(60)
+                continue
+            if all_flat:
+                time.sleep(180)  # All good — rest for 3 min
+            else:
+                # Retry next loop — still within 20-min window
+                time.sleep(30)
         time.sleep(30)
 
 
