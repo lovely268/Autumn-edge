@@ -51,8 +51,67 @@ class TradeJournal:
             CREATE INDEX IF NOT EXISTS idx_trades_timestamp
             ON trades(timestamp_utc)
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS gate_blocks (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp_utc   TEXT NOT NULL,
+                symbol          TEXT,
+                direction       TEXT,
+                price           REAL,
+                conviction      REAL,
+                scenario        TEXT,
+                regime          TEXT,
+                gate_reason     TEXT NOT NULL,
+                gate_group      TEXT NOT NULL,
+                payload_snapshot TEXT,
+                entry_reason    TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_gate_blocks_timestamp
+            ON gate_blocks(timestamp_utc)
+        """)
         conn.commit()
         conn.close()
+
+    def log_gate_block(self, symbol, gate_reason, gate_group, direction=None,
+                       price=None, conviction=None, scenario=None, regime=None,
+                       payload_snapshot=None, entry_reason=None):
+        """Record a blocked signal for gate-performance analysis."""
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("""
+            INSERT INTO gate_blocks
+                (timestamp_utc, symbol, direction, price, conviction,
+                 scenario, regime, gate_reason, gate_group,
+                 payload_snapshot, entry_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            datetime.now(timezone.utc).isoformat(),
+            symbol, direction, price, conviction,
+            scenario, regime, gate_reason, gate_group,
+            json.dumps(payload_snapshot) if payload_snapshot else None,
+            entry_reason
+        ))
+        conn.commit()
+        conn.close()
+
+    def get_gate_block_stats(self):
+        """Return summary counts by gate_group for health dashboard."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute("""
+            SELECT
+                gate_group,
+                gate_reason,
+                COUNT(*) as count,
+                COUNT(DISTINCT symbol) as symbols
+            FROM gate_blocks
+            GROUP BY gate_group, gate_reason
+            ORDER BY count DESC
+        """)
+        rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+        return rows
 
     def log_entry(self, symbol, direction, entry_price, stop_loss, take_profit,
                   quantity, conviction, regime, scenario, silver_bullet,

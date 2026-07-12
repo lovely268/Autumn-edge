@@ -469,6 +469,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # ── GATE 0: Pause check ──
         if _bot_paused:
             log.info(f"🤚 PAUSED: signal rejected ({_pause_reason})")
+            self.journal.log_gate_block(
+                symbol=symbol, gate_reason="bot_paused", gate_group="admin",
+                direction=direction, price=price, conviction=conviction,
+                scenario=scenario, payload_snapshot=payload,
+                entry_reason=entry_reason
+            )
             self._respond(200, {"status": "paused", "reason": _pause_reason})
             return
 
@@ -480,6 +486,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
             age = (now - last["time"]).total_seconds()
             if age < DEDUP_SECONDS:
                 log.warning(f"DEDUP: {dedup_key} already sent {age:.0f}s ago — rejecting")
+                self.journal.log_gate_block(
+                    symbol=symbol, gate_reason=f"duplicate_{DEDUP_SECONDS}s", gate_group="admin",
+                    direction=direction, price=price, conviction=conviction,
+                    scenario=scenario, payload_snapshot=payload,
+                    entry_reason=entry_reason
+                )
                 self._respond(200, {"status": "blocked", "reason": f"duplicate_{DEDUP_SECONDS}s"})
                 return
         _last_signal[dedup_key] = {"time": now}
@@ -491,6 +503,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
             existing = open_positions.get(symbol)
             if existing and existing["direction"] == direction:
                 log.warning(f"POSITION LOCK: already in {direction} {symbol} — rejecting")
+                self.journal.log_gate_block(
+                    symbol=symbol, gate_reason="position_lock_active", gate_group="position",
+                    direction=direction, price=price, conviction=conviction,
+                    scenario=scenario, payload_snapshot=payload,
+                    entry_reason=entry_reason
+                )
                 self._respond(200, {"status": "blocked", "reason": "position_lock_active"})
                 return
 
@@ -498,11 +516,23 @@ class WebhookHandler(BaseHTTPRequestHandler):
         blackout = is_news_blackout()
         if blackout["in_blackout"]:
             log.warning(f"⛔ NEWS: {blackout['event_name']} ({blackout['minutes_remaining']}min)")
+            self.journal.log_gate_block(
+                symbol=symbol, gate_reason=f"news_blackout:{blackout['event_name']}", gate_group="news",
+                direction=direction, price=price, conviction=conviction,
+                scenario=scenario, payload_snapshot=payload,
+                entry_reason=entry_reason
+            )
             self._respond(200, {"status": "blocked", "reason": f"news_blackout:{blackout['event_name']}"})
             return
         geo = check_geopolitical_blackout()
         if geo["in_blackout"]:
             log.warning(f"⚠ GEO: {geo['event_name']}")
+            self.journal.log_gate_block(
+                symbol=symbol, gate_reason=f"geopolitical:{geo['event_name']}", gate_group="news",
+                direction=direction, price=price, conviction=conviction,
+                scenario=scenario, payload_snapshot=payload,
+                entry_reason=entry_reason
+            )
             self._respond(200, {"status": "blocked", "reason": f"geopolitical:{geo['event_name']}"})
             return
 
@@ -511,12 +541,24 @@ class WebhookHandler(BaseHTTPRequestHandler):
         regime = market_regime.get("regime", "trending")
         rec = market_regime.get("recommended_action", {})
         if regime == "ranging" and not rec.get("allow_breakout", True) and scenario in ("breakout", "sweep_breakout"):
+            self.journal.log_gate_block(
+                symbol=symbol, gate_reason="regime_ranging_block_breakout", gate_group="regime",
+                direction=direction, price=price, conviction=conviction,
+                scenario=scenario, regime=regime, payload_snapshot=payload,
+                entry_reason=entry_reason
+            )
             self._respond(200, {"status": "blocked", "reason": "regime_ranging_block_breakout"})
             return
         min_conviction = rec.get("min_conviction", 7.0)
         size_modifier = rec.get("size_modifier", 1.0)
         sl_multiplier = rec.get("sl_multiplier", 1.0)
         if conviction < min_conviction:
+            self.journal.log_gate_block(
+                symbol=symbol, gate_reason=f"regime_conviction:{regime}:need_{min_convition}:got_{conviction}", gate_group="regime",
+                direction=direction, price=price, conviction=conviction,
+                scenario=scenario, regime=regime, payload_snapshot=payload,
+                entry_reason=entry_reason
+            )
             self._respond(200, {"status": "blocked", "reason": f"regime_conviction:{regime}:need_{min_convition}:got_{conviction}"})
             return
 
@@ -529,12 +571,24 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # ── GATE 4: Asia Wed-Fri ──
         asia_hour, asia_end = 5.5 + 1.5/60.0, 7.0
         if asia_hour <= current_hour < asia_end and now.weekday() not in ASIA_TRADING_DAYS:
+            self.journal.log_gate_block(
+                symbol=symbol, gate_reason="asia_blocked_wed_fri", gate_group="time",
+                direction=direction, price=price, conviction=conviction,
+                scenario=scenario, payload_snapshot=payload,
+                entry_reason=entry_reason
+            )
             self._respond(200, {"status": "blocked", "reason": "asia_blocked_wed_fri"})
             return
 
         # ── GATE 4.5: Sync block (live only) ──
         try:
             if os.getenv("TRADOVATE_ENV", "demo") == "live" and get_balance_sync().is_sync_blocked():
+                self.journal.log_gate_block(
+                    symbol=symbol, gate_reason="sync_blocked_3_failures", gate_group="infra",
+                    direction=direction, price=price, conviction=conviction,
+                    scenario=scenario, payload_snapshot=payload,
+                    entry_reason=entry_reason
+                )
                 self._respond(200, {"status": "blocked", "reason": "sync_blocked_3_failures"})
                 return
         except Exception:
@@ -543,17 +597,35 @@ class WebhookHandler(BaseHTTPRequestHandler):
         current_hour_utc = now.hour + now.minute / 60.0
         if CME_MAINT_START <= current_hour_utc < CME_MAINT_END:
             log.info(f"CME maintenance blackout ({CME_MAINT_START}-{CME_MAINT_END} UTC) — blocking signal")
+            self.journal.log_gate_block(
+                symbol=symbol, gate_reason="cme_maintenance_window", gate_group="infra",
+                direction=direction, price=price, conviction=conviction,
+                scenario=scenario, payload_snapshot=payload,
+                entry_reason=entry_reason
+            )
             self._respond(200, {"status": "blocked", "reason": "cme_maintenance_window"})
             return
 
         # ── GATE 5: Lucid Risk ──
         gate_result = self.risk_engine.check_gate(symbol, direction, price, conviction)
         if not gate_result["allowed"]:
+            self.journal.log_gate_block(
+                symbol=symbol, gate_reason=gate_result.get("reason", "gate_5_blocked"), gate_group="risk",
+                direction=direction, price=price, conviction=conviction,
+                scenario=scenario, payload_snapshot=payload,
+                entry_reason=entry_reason
+            )
             self._respond(200, {"status": "blocked", "reason": gate_result["reason"]})
             return
 
         # ── Stop Loss Determination ──
         if sl_target <= 0:
+            self.journal.log_gate_block(
+                symbol=symbol, gate_reason="missing_stop_distance", gate_group="data",
+                direction=direction, price=price, conviction=conviction,
+                scenario=scenario, payload_snapshot=payload,
+                entry_reason=entry_reason
+            )
             self._respond(200, {"status": "blocked", "reason": "missing_stop_distance"})
             return
         sl_dist = abs(price - sl_target) * sl_multiplier
@@ -565,6 +637,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
         contracts = self.risk_engine.calculate_contracts(symbol, direction, price, conviction, sl_dist)
         contracts = max(1, int(contracts * size_modifier))
         if contracts <= 0:
+            self.journal.log_gate_block(
+                symbol=symbol, gate_reason="zero_contracts", gate_group="sizing",
+                direction=direction, price=price, conviction=conviction,
+                scenario=scenario, payload_snapshot=payload,
+                entry_reason=entry_reason
+            )
             self._respond(200, {"status": "blocked", "reason": "zero_contracts"})
             return
 
