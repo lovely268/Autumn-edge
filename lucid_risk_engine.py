@@ -10,7 +10,7 @@ import logging
 from datetime import datetime, timezone, date, timedelta
 from zoneinfo import ZoneInfo
 
-STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lucid_state.json")
+STATE_PATH = os.path.join(os.getenv("RAILWAY_VOLUME_MOUNT_PATH", os.path.dirname(os.path.abspath(__file__))), "lucid_state.json")
 STATE_BACKUP_PATH = STATE_PATH + ".bak"
 STATE_VERSION = 2
 
