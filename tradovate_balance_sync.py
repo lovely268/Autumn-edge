@@ -19,7 +19,7 @@ MAX_CONSECUTIVE_FAILURES = 3      # Block new entries after this many failures
 SYNC_COOLDOWN_SECONDS = 1800      # 30 min between periodic syncs
 
 # State file for sync tracking (separate from risk engine state)
-SYNC_STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "balance_sync_state.json")
+SYNC_STATE_PATH = os.path.join(os.getenv("RAILWAY_VOLUME_MOUNT_PATH", os.path.dirname(os.path.abspath(__file__))), "balance_sync_state.json")
 
 
 class BalanceSync:

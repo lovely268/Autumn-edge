@@ -8,7 +8,7 @@ import json
 import os
 from datetime import datetime, timezone
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_journal.db")
+DB_PATH = os.path.join(os.getenv("RAILWAY_VOLUME_MOUNT_PATH", os.path.dirname(os.path.abspath(__file__))), "trade_journal.db")
 
 
 class TradeJournal:
