@@ -554,12 +554,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
         sl_multiplier = rec.get("sl_multiplier", 1.0)
         if conviction < min_conviction:
             self.journal.log_gate_block(
-                symbol=symbol, gate_reason=f"regime_conviction:{regime}:need_{min_convition}:got_{conviction}", gate_group="regime",
+                symbol=symbol, gate_reason=f"regime_conviction:{regime}:need_{min_conviction}:got_{conviction}", gate_group="regime",
                 direction=direction, price=price, conviction=conviction,
                 scenario=scenario, regime=regime, payload_snapshot=payload,
                 entry_reason=entry_reason
             )
-            self._respond(200, {"status": "blocked", "reason": f"regime_conviction:{regime}:need_{min_convition}:got_{conviction}"})
+            self._respond(200, {"status": "blocked", "reason": f"regime_conviction:{regime}:need_{min_conviction}:got_{conviction}"})
             return
 
         # ── GATE 3: Silver Bullet Boost ──
