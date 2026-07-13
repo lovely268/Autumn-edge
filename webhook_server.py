@@ -192,6 +192,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 else:
                     active_gates.append("asia_blocked_wed_fri")
             status["gates"] = {"active_blockers": active_gates, "active_boosters": semi_active}
+            status["gate_blocks_summary"] = self.journal.get_gate_block_stats()
             # Execution health
             status["execution"] = {
                 "last_order_id": self.risk_engine.state.get("last_order_id"),
