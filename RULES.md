@@ -84,6 +84,9 @@ Owner-side account actions (TradingView, STA, Tradovate, Lucid) are the owner's;
 ### 4.4 No improvisation around blocked paths
 Escalate uncertainty; never create agents, credentials, or workarounds to route around process.
 
+### 4.5 Agent-creation approval gate
+Creating any new agent or team member — credentialed or not — requires explicit owner approval BEFORE creation. Routing work to an existing approved agent is always preferred over creating a new one. Any agent discovered on the roster without a creation-approval record is paused on sight, reported to the owner, and remains frozen pending owner inspection of its configuration and credentials.
+
 ---
 
 ## §5 — MEASUREMENT INTEGRITY
