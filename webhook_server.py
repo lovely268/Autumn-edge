@@ -336,7 +336,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
             payload = json.loads(raw_body)
         except json.JSONDecodeError:
             log.error(f"INVALID_JSON: raw_body={raw_body!r}")
-            # Single respond — no duplicate (verified per-function grep)
             self._respond(400, {"error": "invalid_json", "debug": "json_decode_failed"})
             return
         trade_id = payload.get("trade_id")
