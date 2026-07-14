@@ -335,7 +335,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(raw_body)
         except json.JSONDecodeError:
-            self._respond(400, {"error": "invalid_json"})
+            log.error(f"INVALID_JSON: raw_body={raw_body!r}")
+            self._respond(400, {"error": "invalid_json", "debug": "json_decode_failed"})
             return
         trade_id = payload.get("trade_id")
         exit_price = float(payload.get("exit_price", 0))
@@ -438,7 +439,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(raw_body)
         except json.JSONDecodeError:
-            self._respond(400, {"error": "invalid_json"})
+            log.error(f"INVALID_JSON: raw_body={raw_body!r}")
+            self._respond(400, {"error": "invalid_json", "debug": "json_decode_failed"})
             return
 
         # ── Signature check (NO secret = reject all non-TradingView) ──
@@ -462,7 +464,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
         scenario = payload.get("scenario", "sweep_mss_fvg")
 
         if not symbol or not direction or price <= 0:
-            self._respond(400, {"error": "missing_fields"})
+            log.error(f"MISSING_FIELDS: symbol={symbol!r} direction={direction!r} price={price} raw_body={raw_body!r}")
+            self._respond(400, {"error": "missing_fields", "debug": {"symbol": symbol, "direction": direction, "price": price}})
             return
 
         log.info(f"SIGNAL: {direction.upper()} {symbol} @ {price} conviction={conviction}/10")
